@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://table-qa.local/schemas/table_view_v1.json",
+  "type": "object",
+  "properties": {
+    "text": {
+      "type": "string",
+      "minLength": 1
+    },
+    "table_view_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "context_meta": {
+      "type": "object",
+      "properties": {
+        "sheets_included": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "included_ranges": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Z]{1,3}[1-9][0-9]{0,6}:[A-Z]{1,3}[1-9][0-9]{0,6}$"
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          }
+        },
+        "table_view_hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "coverage": {
+          "const": "full"
+        },
+        "truncated": {
+          "const": false
+        }
+      },
+      "required": [
+        "sheets_included",
+        "included_ranges",
+        "table_view_hash",
+        "coverage",
+        "truncated"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "text",
+    "table_view_hash",
+    "context_meta"
+  ],
+  "additionalProperties": false
+}

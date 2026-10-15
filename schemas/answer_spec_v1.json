@@ -1,0 +1,199 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://table-qa.local/schemas/answer_spec_v1.json",
+  "type": "object",
+  "properties": {
+    "kind": {
+      "enum": [
+        "integer",
+        "fixed_decimal",
+        "yes_no",
+        "last_name",
+        "category",
+        "ordered_labels",
+        "number_pair",
+        "decimal_pair"
+      ]
+    },
+    "decimals": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 0
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "separator": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "allowed_values": {
+      "anyOf": [
+        {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "item_count": {
+      "anyOf": [
+        {
+          "type": "integer",
+          "minimum": 1
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "rounding": {
+      "const": "ROUND_HALF_UP",
+      "default": "ROUND_HALF_UP"
+    }
+  },
+  "required": [
+    "kind",
+    "decimals",
+    "separator",
+    "allowed_values"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "fixed_decimal",
+              "decimal_pair"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "decimals": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "decimals": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "number_pair",
+              "decimal_pair"
+            ]
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "item_count"
+        ],
+        "properties": {
+          "item_count": {
+            "const": 2
+          },
+          "separator": {
+            "const": ", "
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "ordered_labels"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "item_count"
+        ],
+        "properties": {
+          "item_count": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "separator": {
+            "const": ", "
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "enum": [
+              "integer",
+              "fixed_decimal",
+              "yes_no",
+              "last_name",
+              "category"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "separator": {
+            "type": "null"
+          },
+          "item_count": {
+            "type": "null"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "yes_no"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "allowed_values": {
+            "const": [
+              "Yes",
+              "No"
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

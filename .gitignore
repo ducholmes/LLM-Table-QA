@@ -1,6 +1,9 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
+*.egg-info/
+build/
+runs/
 *$py.class
 
 # C extensions

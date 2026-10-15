@@ -1,0 +1,1063 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://table-qa.local/schemas/plan_v1.json",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": "plan_v1"
+    },
+    "query_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "table_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/step"
+      },
+      "minItems": 1,
+      "maxItems": 20
+    },
+    "return": {
+      "type": "object",
+      "properties": {
+        "ref": {
+          "type": "string",
+          "pattern": "^\\$s[1-9][0-9]*$"
+        }
+      },
+      "required": [
+        "ref"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "version",
+    "query_id",
+    "table_id",
+    "steps",
+    "return"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "operand": {
+      "anyOf": [
+        {
+          "type": [
+            "number",
+            "boolean",
+            "null"
+          ]
+        },
+        {
+          "type": "string",
+          "pattern": "^(?!\\$)"
+        },
+        {
+          "type": "string",
+          "pattern": "^\\$s[1-9][0-9]*$"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "literal": {
+              "type": [
+                "string",
+                "number",
+                "boolean",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "literal"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "field_selector": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "column": {
+              "type": "string",
+              "pattern": "^[A-Z]{1,3}$"
+            },
+            "as_type": {
+              "enum": [
+                "number",
+                "date",
+                "string",
+                "boolean"
+              ]
+            }
+          },
+          "required": [
+            "column"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "column_header_path": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "as_type": {
+              "enum": [
+                "number",
+                "date",
+                "string",
+                "boolean"
+              ]
+            }
+          },
+          "required": [
+            "column_header_path"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "predicate": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string",
+              "minLength": 1
+            },
+            "predicate": {
+              "enum": [
+                "eq",
+                "ne",
+                "gt",
+                "gte",
+                "lt",
+                "lte"
+              ]
+            },
+            "value": {
+              "$ref": "#/$defs/operand"
+            }
+          },
+          "required": [
+            "field",
+            "predicate",
+            "value"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "field": {
+              "type": "string",
+              "minLength": 1
+            },
+            "predicate": {
+              "const": "in"
+            },
+            "value": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "pattern": "^\\$s[1-9][0-9]*$"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/operand"
+                  }
+                }
+              ]
+            }
+          },
+          "required": [
+            "field",
+            "predicate",
+            "value"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "step": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^s[1-9][0-9]*$"
+            },
+            "op": {
+              "const": "lookup_cell"
+            },
+            "args": {
+              "$ref": "#/$defs/lookup_cell_args"
+            }
+          },
+          "required": [
+            "id",
+            "op",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^s[1-9][0-9]*$"
+            },
+            "op": {
+              "const": "select_records"
+            },
+            "args": {
+              "$ref": "#/$defs/select_records_args"
+            }
+          },
+          "required": [
+            "id",
+            "op",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^s[1-9][0-9]*$"
+            },
+            "op": {
+              "const": "collect"
+            },
+            "args": {
+              "$ref": "#/$defs/collect_args"
+            }
+          },
+          "required": [
+            "id",
+            "op",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^s[1-9][0-9]*$"
+            },
+            "op": {
+              "const": "derive"
+            },
+            "args": {
+              "$ref": "#/$defs/derive_args"
+            }
+          },
+          "required": [
+            "id",
+            "op",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^s[1-9][0-9]*$"
+            },
+            "op": {
+              "const": "aggregate"
+            },
+            "args": {
+              "$ref": "#/$defs/aggregate_args"
+            }
+          },
+          "required": [
+            "id",
+            "op",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^s[1-9][0-9]*$"
+            },
+            "op": {
+              "const": "sort"
+            },
+            "args": {
+              "$ref": "#/$defs/sort_args"
+            }
+          },
+          "required": [
+            "id",
+            "op",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^s[1-9][0-9]*$"
+            },
+            "op": {
+              "const": "take"
+            },
+            "args": {
+              "$ref": "#/$defs/take_args"
+            }
+          },
+          "required": [
+            "id",
+            "op",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^s[1-9][0-9]*$"
+            },
+            "op": {
+              "const": "project"
+            },
+            "args": {
+              "$ref": "#/$defs/project_args"
+            }
+          },
+          "required": [
+            "id",
+            "op",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^s[1-9][0-9]*$"
+            },
+            "op": {
+              "const": "compare"
+            },
+            "args": {
+              "$ref": "#/$defs/compare_args"
+            }
+          },
+          "required": [
+            "id",
+            "op",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^s[1-9][0-9]*$"
+            },
+            "op": {
+              "const": "filter"
+            },
+            "args": {
+              "$ref": "#/$defs/filter_args"
+            }
+          },
+          "required": [
+            "id",
+            "op",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^s[1-9][0-9]*$"
+            },
+            "op": {
+              "const": "add"
+            },
+            "args": {
+              "$ref": "#/$defs/add_args"
+            }
+          },
+          "required": [
+            "id",
+            "op",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^s[1-9][0-9]*$"
+            },
+            "op": {
+              "const": "subtract"
+            },
+            "args": {
+              "$ref": "#/$defs/subtract_args"
+            }
+          },
+          "required": [
+            "id",
+            "op",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^s[1-9][0-9]*$"
+            },
+            "op": {
+              "const": "abs_diff"
+            },
+            "args": {
+              "$ref": "#/$defs/abs_diff_args"
+            }
+          },
+          "required": [
+            "id",
+            "op",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^s[1-9][0-9]*$"
+            },
+            "op": {
+              "const": "divide"
+            },
+            "args": {
+              "$ref": "#/$defs/divide_args"
+            }
+          },
+          "required": [
+            "id",
+            "op",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^s[1-9][0-9]*$"
+            },
+            "op": {
+              "const": "argmax"
+            },
+            "args": {
+              "$ref": "#/$defs/argmax_args"
+            }
+          },
+          "required": [
+            "id",
+            "op",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "pattern": "^s[1-9][0-9]*$"
+            },
+            "op": {
+              "const": "argmin"
+            },
+            "args": {
+              "$ref": "#/$defs/argmin_args"
+            }
+          },
+          "required": [
+            "id",
+            "op",
+            "args"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "lookup_cell_args": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "sheet": {
+              "type": "string",
+              "minLength": 1
+            },
+            "as_type": {
+              "enum": [
+                "number",
+                "date",
+                "string",
+                "boolean"
+              ]
+            },
+            "cell": {
+              "type": "string",
+              "pattern": "^[A-Z]{1,3}[1-9][0-9]{0,6}$"
+            }
+          },
+          "required": [
+            "sheet",
+            "cell"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "sheet": {
+              "type": "string",
+              "minLength": 1
+            },
+            "as_type": {
+              "enum": [
+                "number",
+                "date",
+                "string",
+                "boolean"
+              ]
+            },
+            "section_path": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "row_header_path": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "column_header_path": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "required": [
+            "sheet",
+            "section_path",
+            "row_header_path",
+            "column_header_path"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "select_records_args": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "sheet": {
+              "type": "string",
+              "minLength": 1
+            },
+            "row_range": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]{0,6}:[1-9][0-9]{0,6}$"
+            },
+            "fields": {
+              "type": "object",
+              "minProperties": 1,
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/field_selector"
+              }
+            }
+          },
+          "required": [
+            "sheet",
+            "row_range",
+            "fields"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "sheet": {
+              "type": "string",
+              "minLength": 1
+            },
+            "section_path": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "fields": {
+              "type": "object",
+              "minProperties": 1,
+              "propertyNames": {
+                "type": "string",
+                "minLength": 1
+              },
+              "additionalProperties": {
+                "$ref": "#/$defs/field_selector"
+              }
+            }
+          },
+          "required": [
+            "sheet",
+            "section_path",
+            "fields"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "collect_args": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/operand"
+              }
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "minProperties": 1,
+                "propertyNames": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "additionalProperties": {
+                  "$ref": "#/$defs/operand"
+                },
+                "not": {
+                  "required": [
+                    "literal"
+                  ],
+                  "maxProperties": 1
+                }
+              },
+              "minItems": 1
+            }
+          ]
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "additionalProperties": false
+    },
+    "derive_args": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "pattern": "^\\$s[1-9][0-9]*$"
+        },
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fn": {
+          "enum": [
+            "add",
+            "subtract",
+            "abs_diff",
+            "divide",
+            "date_diff_days",
+            "date_diff_months",
+            "date_diff_years",
+            "absolute"
+          ]
+        },
+        "inputs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "maxItems": 2
+        }
+      },
+      "required": [
+        "source",
+        "field",
+        "fn",
+        "inputs"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {"fn": {"const": "absolute"}},
+            "required": ["fn"]
+          },
+          "then": {
+            "properties": {"inputs": {"minItems": 1, "maxItems": 1}}
+          },
+          "else": {
+            "properties": {"inputs": {"minItems": 2, "maxItems": 2}}
+          }
+        }
+      ]
+    },
+    "aggregate_args": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "source": {
+              "type": "string",
+              "pattern": "^\\$s[1-9][0-9]*$"
+            },
+            "fn": {
+              "const": "count"
+            }
+          },
+          "required": [
+            "source",
+            "fn"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "source": {
+              "type": "string",
+              "pattern": "^\\$s[1-9][0-9]*$"
+            },
+            "fn": {
+              "enum": [
+                "sum",
+                "mean",
+                "max",
+                "min"
+              ]
+            },
+            "field": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "source",
+            "fn"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "sort_args": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "pattern": "^\\$s[1-9][0-9]*$"
+        },
+        "by": {
+          "type": "string",
+          "minLength": 1
+        },
+        "order": {
+          "enum": [
+            "asc",
+            "desc"
+          ]
+        },
+        "tie_breaker": {
+          "enum": [
+            "row_order",
+            "error"
+          ],
+          "default": "row_order"
+        }
+      },
+      "required": [
+        "source",
+        "by",
+        "order"
+      ],
+      "additionalProperties": false
+    },
+    "take_args": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "pattern": "^\\$s[1-9][0-9]*$"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "source",
+        "offset",
+        "count"
+      ],
+      "additionalProperties": false
+    },
+    "project_args": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "pattern": "^\\$s[1-9][0-9]*$"
+        },
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "single": {
+          "type": "boolean",
+          "default": false
+        }
+      },
+      "required": [
+        "source",
+        "field"
+      ],
+      "additionalProperties": false
+    },
+    "compare_args": {
+      "type": "object",
+      "properties": {
+        "left": {
+          "$ref": "#/$defs/operand"
+        },
+        "right": {
+          "$ref": "#/$defs/operand"
+        },
+        "predicate": {
+          "enum": [
+            "gt",
+            "gte",
+            "lt",
+            "lte",
+            "eq",
+            "ne"
+          ]
+        }
+      },
+      "required": [
+        "left",
+        "right",
+        "predicate"
+      ],
+      "additionalProperties": false
+    },
+    "filter_args": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "pattern": "^\\$s[1-9][0-9]*$"
+        },
+        "predicates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/predicate"
+          },
+          "minItems": 1
+        }
+      },
+      "required": [
+        "source",
+        "predicates"
+      ],
+      "additionalProperties": false
+    },
+    "add_args": {
+      "type": "object",
+      "properties": {
+        "left": {
+          "$ref": "#/$defs/operand"
+        },
+        "right": {
+          "$ref": "#/$defs/operand"
+        }
+      },
+      "required": [
+        "left",
+        "right"
+      ],
+      "additionalProperties": false
+    },
+    "subtract_args": {
+      "type": "object",
+      "properties": {
+        "left": {
+          "$ref": "#/$defs/operand"
+        },
+        "right": {
+          "$ref": "#/$defs/operand"
+        }
+      },
+      "required": [
+        "left",
+        "right"
+      ],
+      "additionalProperties": false
+    },
+    "abs_diff_args": {
+      "type": "object",
+      "properties": {
+        "left": {
+          "$ref": "#/$defs/operand"
+        },
+        "right": {
+          "$ref": "#/$defs/operand"
+        }
+      },
+      "required": [
+        "left",
+        "right"
+      ],
+      "additionalProperties": false
+    },
+    "divide_args": {
+      "type": "object",
+      "properties": {
+        "left": {
+          "$ref": "#/$defs/operand"
+        },
+        "right": {
+          "$ref": "#/$defs/operand"
+        }
+      },
+      "required": [
+        "left",
+        "right"
+      ],
+      "additionalProperties": false
+    },
+    "argmax_args": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "pattern": "^\\$s[1-9][0-9]*$"
+        },
+        "by": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ties": {
+          "enum": [
+            "error",
+            "first",
+            "all"
+          ],
+          "default": "error"
+        }
+      },
+      "required": [
+        "source",
+        "by"
+      ],
+      "additionalProperties": false
+    },
+    "argmin_args": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "pattern": "^\\$s[1-9][0-9]*$"
+        },
+        "by": {
+          "type": "string",
+          "minLength": 1
+        },
+        "ties": {
+          "enum": [
+            "error",
+            "first",
+            "all"
+          ],
+          "default": "error"
+        }
+      },
+      "required": [
+        "source",
+        "by"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

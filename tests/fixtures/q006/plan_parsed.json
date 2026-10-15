@@ -1,0 +1,52 @@
+{
+  "version": "plan_v1",
+  "query_id": "p4_q006",
+  "table_id": "p4_t04.xlsx",
+  "steps": [
+    {
+      "id": "s1",
+      "op": "lookup_cell",
+      "args": {
+        "sheet": "cpsaat07",
+        "section_path": [
+          "Women"
+        ],
+        "row_header_path": [
+          "Civilian noninstitutional population"
+        ],
+        "column_header_path": [
+          "Some college or associate degree",
+          "Some college, no degree"
+        ]
+      }
+    },
+    {
+      "id": "s2",
+      "op": "lookup_cell",
+      "args": {
+        "sheet": "cpsaat07",
+        "section_path": [
+          "Women"
+        ],
+        "row_header_path": [
+          "Civilian labor force"
+        ],
+        "column_header_path": [
+          "Some college or associate degree",
+          "Some college, no degree"
+        ]
+      }
+    },
+    {
+      "id": "s3",
+      "op": "abs_diff",
+      "args": {
+        "left": "$s1",
+        "right": "$s2"
+      }
+    }
+  ],
+  "return": {
+    "ref": "$s3"
+  }
+}

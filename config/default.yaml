@@ -1,0 +1,31 @@
+run_profile: development
+input_mode: raw
+answer_mode: plan_tools
+prompt_version: planner_v1
+schema_version: plan_v1
+context_policy: full_table
+max_workers: 1
+queries: data/Public data 1/queries.json
+data_dir: data/Public data 1/xlsx_files
+run_root: runs
+llm:
+  provider: mock
+  model: mock
+  json_mode: json_schema
+  max_output_tokens: 2400
+  request_timeout_seconds: 90
+  max_api_attempts: 3
+  max_planner_repair_calls: 1
+  provider_options:
+    mock: {}
+    gemini:
+      api_key_env: GEMINI_API_KEY
+      api_surface: generate_content
+      thinking_level: low
+    openrouter:
+      api_key_env: OPENROUTER_API_KEY
+      base_url: https://openrouter.ai/api/v1
+      temperature: 0
+query_timeout_seconds: 240
+run_timeout_seconds: 2400
+submission_policy: fail_run

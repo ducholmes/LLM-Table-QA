@@ -1,0 +1,645 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://table-qa.local/schemas/table_context_v1.json",
+  "type": "object",
+  "properties": {
+    "version": {
+      "const": "table_context_v1"
+    },
+    "table_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_hash": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "sheets": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/sheet"
+      },
+      "minItems": 1
+    },
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "date_system": {
+          "enum": [
+            "1900",
+            "1904"
+          ]
+        }
+      },
+      "required": [
+        "date_system"
+      ],
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "version",
+    "table_id",
+    "source_hash",
+    "sheets",
+    "metadata"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "raw_cell": {
+      "type": "object",
+      "properties": {
+        "sheet": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cell": {
+          "type": "string",
+          "pattern": "^[A-Z]{1,3}[1-9][0-9]{0,6}$"
+        },
+        "row_index": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "column_index": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "value_raw": {
+          "type": [
+            "string",
+            "number",
+            "boolean",
+            "null"
+          ]
+        },
+        "value_type": {
+          "enum": [
+            "number",
+            "date",
+            "string",
+            "boolean",
+            "empty",
+            "error"
+          ]
+        },
+        "display_value": {
+          "type": "string"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "number_format": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "formula": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "date_iso": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "merged_anchor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Z]{1,3}[1-9][0-9]{0,6}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "sheet",
+        "cell",
+        "row_index",
+        "column_index",
+        "value_raw",
+        "value_type",
+        "display_value",
+        "unit"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "number"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value_raw": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "string"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value_raw": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "boolean"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value_raw": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "empty"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value_raw": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "date"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value_raw": {
+                "type": [
+                  "number",
+                  "string"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "error"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value_raw": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "cell_fact": {
+      "type": "object",
+      "properties": {
+        "sheet": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cell": {
+          "type": "string",
+          "pattern": "^[A-Z]{1,3}[1-9][0-9]{0,6}$"
+        },
+        "row_index": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "column_index": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "value_raw": {
+          "type": [
+            "string",
+            "number",
+            "boolean",
+            "null"
+          ]
+        },
+        "value_type": {
+          "enum": [
+            "number",
+            "date",
+            "string",
+            "boolean",
+            "empty",
+            "error"
+          ]
+        },
+        "display_value": {
+          "type": "string"
+        },
+        "unit": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "number_format": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "formula": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "date_iso": {
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "merged_anchor": {
+          "anyOf": [
+            {
+              "type": "string",
+              "pattern": "^[A-Z]{1,3}[1-9][0-9]{0,6}$"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "section_path": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "row_header_path": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "column_header_path": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "required": [
+        "sheet",
+        "cell",
+        "row_index",
+        "column_index",
+        "value_raw",
+        "value_type",
+        "display_value",
+        "unit",
+        "section_path",
+        "row_header_path",
+        "column_header_path"
+      ],
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "number"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value_raw": {
+                "type": "number"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "string"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value_raw": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "boolean"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value_raw": {
+                "type": "boolean"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "empty"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value_raw": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "date"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value_raw": {
+                "type": [
+                  "number",
+                  "string"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "value_type": {
+                "const": "error"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "value_raw": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "raw_row": {
+      "type": "object",
+      "properties": {
+        "row_index": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "cells": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/raw_cell"
+          }
+        }
+      },
+      "required": [
+        "row_index",
+        "cells"
+      ],
+      "additionalProperties": false
+    },
+    "section": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1
+        },
+        "label_cell": {
+          "type": "string",
+          "pattern": "^[A-Z]{1,3}[1-9][0-9]{0,6}$"
+        },
+        "row_start": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "row_end": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "path",
+        "label_cell",
+        "row_start",
+        "row_end"
+      ],
+      "additionalProperties": false
+    },
+    "sheet": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "visibility": {
+          "enum": [
+            "visible",
+            "hidden",
+            "veryHidden"
+          ]
+        },
+        "dimensions": {
+          "type": "string",
+          "pattern": "^[A-Z]{1,3}[1-9][0-9]{0,6}:[A-Z]{1,3}[1-9][0-9]{0,6}$"
+        },
+        "raw_rows": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/raw_row"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "parsed_cells": {
+          "anyOf": [
+            {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/cell_fact"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "header_rows": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "uniqueItems": true
+        },
+        "sections": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/section"
+          }
+        },
+        "merged_ranges": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Z]{1,3}[1-9][0-9]{0,6}:[A-Z]{1,3}[1-9][0-9]{0,6}$"
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "name",
+        "visibility",
+        "dimensions",
+        "raw_rows",
+        "parsed_cells",
+        "header_rows",
+        "sections",
+        "merged_ranges"
+      ],
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "raw_rows": {
+              "type": "array"
+            },
+            "parsed_cells": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "raw_rows": {
+              "type": "null"
+            },
+            "parsed_cells": {
+              "type": "array"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

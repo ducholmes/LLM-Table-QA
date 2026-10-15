@@ -1,0 +1,34 @@
+{
+  "version": "plan_v1",
+  "query_id": "p4_q006",
+  "table_id": "p4_t04.xlsx",
+  "steps": [
+    {
+      "id": "s1",
+      "op": "lookup_cell",
+      "args": {
+        "sheet": "cpsaat07",
+        "cell": "E25"
+      }
+    },
+    {
+      "id": "s2",
+      "op": "lookup_cell",
+      "args": {
+        "sheet": "cpsaat07",
+        "cell": "E26"
+      }
+    },
+    {
+      "id": "s3",
+      "op": "abs_diff",
+      "args": {
+        "left": "$s1",
+        "right": "$s2"
+      }
+    }
+  ],
+  "return": {
+    "ref": "$s3"
+  }
+}

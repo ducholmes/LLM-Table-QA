@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-table-qa"
+version = "0.1.0"
+description = "Contracts and orchestration for spreadsheet question answering"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["jsonschema>=4.19,<5", "PyYAML>=6,<7", "python-dotenv>=1.0,<2"]
+
+[project.optional-dependencies]
+openrouter = ["openai>=1.68,<3"]
+gemini = ["google-genai>=2.0,<3"]
+providers = ["openai>=1.68,<3", "google-genai>=2.0,<3"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+table_qa = ["prompts/*.txt", "schemas/*.json"]

@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://table-qa.local/schemas/runtime_limits_v1.json",
+  "type": "object",
+  "properties": {
+    "max_steps": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 20
+    },
+    "max_selected_cells": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "max_records": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "max_api_attempts": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 5
+    },
+    "max_planner_repair_calls": {
+      "enum": [
+        0,
+        1
+      ]
+    },
+    "request_timeout_seconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "query_timeout_seconds": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "run_timeout_seconds": {
+      "type": "integer",
+      "minimum": 1
+    }
+  },
+  "required": [
+    "max_steps",
+    "max_selected_cells",
+    "max_records",
+    "max_api_attempts",
+    "max_planner_repair_calls",
+    "request_timeout_seconds",
+    "query_timeout_seconds",
+    "run_timeout_seconds"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,1 @@
+"""Table input adapters."""
