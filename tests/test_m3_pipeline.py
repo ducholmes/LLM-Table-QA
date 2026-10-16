@@ -7,7 +7,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from table_qa.answer_spec import format_answer, validate_answer, validate_direct_envelope
+from table_qa.answer_spec import (
+    format_answer, format_runtime_answer, validate_answer, validate_direct_envelope,
+)
 from table_qa.contracts import AnswerSpec, LLMResponse, PipelineError, RuntimeLimits, TokenUsage
 from table_qa.mock_llm import MockLLMClient
 from table_qa.runner import _write_submission, run_offline
@@ -24,9 +26,9 @@ def spec(kind, *, decimals=None, separator=None, allowed_values=None, item_count
                       allowed_values=allowed_values, item_count=item_count)
 
 
-def response(text):
+def response(text, finish_reason=None):
     return LLMResponse(text=text, provider="mock", model_requested="mock", model_returned="mock",
-                       usage=TokenUsage(), llm_elapsed_ms=0.5)
+                       usage=TokenUsage(), llm_elapsed_ms=0.5, finish_reason=finish_reason)
 
 
 class SequenceClient:
@@ -37,6 +39,17 @@ class SequenceClient:
     def generate(self, request):
         self.requests.append(request)
         return response(self.texts.pop(0))
+
+
+class FinishSequenceClient:
+    def __init__(self, *items):
+        self.items = list(items)
+        self.requests = []
+
+    def generate(self, request):
+        self.requests.append(request)
+        text, finish_reason = self.items.pop(0)
+        return response(text, finish_reason)
 
 
 class FixturePlanClient:
@@ -77,6 +90,19 @@ def q006_plan(cell1="E25", cell2="E26"):
 
 
 class AnswerFormattingTests(unittest.TestCase):
+    def test_generic_runtime_formatter_supports_flat_mixed_answers(self):
+        self.assertEqual(format_runtime_answer(["Mexican", 16]), "Mexican, 16")
+        self.assertEqual(
+            format_runtime_answer(["group", Decimal("0.275")],
+                                  {"separator": ", ", "decimal_places": 2}),
+            "group, 0.28",
+        )
+        self.assertEqual(format_runtime_answer(Decimal("14.2"), {"decimal_places": 2}), "14.20")
+        self.assertEqual(format_runtime_answer(True), "Yes")
+        for value in ([], None, {"answer": 1}, [[1]], ["ok", None], "two\nlines"):
+            with self.subTest(value=value), self.assertRaises(PipelineError):
+                format_runtime_answer(value)
+
     def test_typed_formats_and_round_half_up(self):
         self.assertEqual(format_answer(7668, spec("integer")), "7668")
         self.assertEqual(format_answer(Decimal("3.1375"), spec("fixed_decimal", decimals=2)), "3.14")
@@ -164,22 +190,54 @@ class M3FlowTests(unittest.TestCase):
             self.assertEqual(result["answer"], "7668")
             self.assertEqual(result["planner_repair_calls"], 1)
 
-    def test_format_error_does_not_trigger_plan_repair_or_emit_csv(self):
+    def test_final_shape_error_triggers_one_plan_repair(self):
         plan = json.dumps({"version": "plan_v1", "query_id": "p4_q006", "table_id": "p4_t04.xlsx",
-                           "steps": [{"id": "s1", "op": "collect", "args": {"items": [{"literal": "wrong type"}]}}],
+                           "steps": [{"id": "s1", "op": "collect", "args": {"items": [
+                               {"label": {"literal": "not a flat final scalar"}}
+                           ]}}],
                            "return": {"ref": "$s1"}})
-        client = SequenceClient(plan)
+        client = SequenceClient(plan, q006_plan())
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = self.run_q006(client, Path(tmp))
             result = json.loads((run_dir / "results.jsonl").read_text().splitlines()[0])
-            self.assertEqual(result["status"], "error")
-            self.assertEqual(result["error"]["code"], "FORMAT_INVALID")
-            self.assertEqual(result["llm_calls"], 1)
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["answer"], "7668")
+            self.assertEqual(result["llm_calls"], 2)
+            self.assertEqual(result["planner_repair_calls"], 1)
+            self.assertIn('"code": "FORMAT_INVALID"', client.requests[1].user_prompt)
+            self.assertTrue((run_dir / "submission.csv").exists())
+
+    def test_output_limit_retries_once_then_reports_truncation_separately(self):
+        client = FinishSequenceClient(
+            ("partial", "MAX_TOKENS"), ("still partial", "MAX_TOKENS"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.run_q006(client, Path(tmp))
+            result = json.loads((run_dir / "results.jsonl").read_text().splitlines()[0])
+            events = [json.loads(line) for line in (run_dir / "logs.jsonl").read_text().splitlines()]
+            summary = json.loads((run_dir / "summary.json").read_text())
+            self.assertEqual(result["error"]["code"], "OUTPUT_TRUNCATED")
+            self.assertEqual(result["llm_calls"], 2)
             self.assertEqual(result["planner_repair_calls"], 0)
-            self.assertFalse((run_dir / "submission.csv").exists())
+            self.assertEqual(client.requests[1].max_output_tokens,
+                             client.requests[0].max_output_tokens * 2)
+            self.assertTrue(any(event["event"] == "output_truncated" for event in events))
+            self.assertEqual(summary["error_distribution"], {"output_truncated": 1})
+
+        client = FinishSequenceClient(("partial", "MAX_TOKENS"), (q006_plan(), "STOP"))
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = self.run_q006(client, Path(tmp))
+            result = json.loads((run_dir / "results.jsonl").read_text().splitlines()[0])
+            events = [json.loads(line) for line in (run_dir / "logs.jsonl").read_text().splitlines()]
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["llm_calls"], 2)
+            self.assertEqual(result["planner_repair_calls"], 0)
+            complete = next(event for event in events if event["event"] == "execution_complete")
+            self.assertEqual(complete["final_answer"], "7668")
+            self.assertIsNone(complete["return_format"])
 
     def test_direct_mode_calls_once_and_never_repairs_format_errors(self):
-        client = SequenceClient('{"answer":"bad"}')
+        client = SequenceClient('{"answer":"bad\\nvalue"}')
         with tempfile.TemporaryDirectory() as tmp:
             query = json.loads((FIXTURES / "query.json").read_text(encoding="utf-8"))
             queries_path = Path(tmp) / "queries.json"

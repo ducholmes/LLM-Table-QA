@@ -10,6 +10,7 @@ from hashlib import sha256
 import io
 import json
 from pathlib import Path
+import random
 import sys
 import time
 from typing import Any
@@ -17,7 +18,7 @@ import uuid
 
 from .adapters.parsed import ParsedTableAdapter
 from .adapters.raw import RawWorkbookAdapter
-from .answer_spec import format_answer
+from .answer_spec import format_runtime_answer
 from .context_builder import build_query_context
 from .config import LLMConfig
 from .contracts import LLMResponse, PipelineError, QueryContext, RuntimeLimits, StepResult, TableContext, TokenUsage
@@ -33,6 +34,7 @@ from .llm.telemetry import MeasuredClient
 from .logging import append_jsonl
 from .planner import REPAIRABLE_ERRORS, build_plan_request, validate_plan_data
 from .query_loader import load_queries
+from .rate_limit import ActiveTimer, RequestQuotaGate, build_quota_gate, estimate_input_tokens, rate_limit_settings
 
 
 _RETRYABLE_API_ERRORS = frozenset({"API_SERVER_ERROR", "API_TIMEOUT", "API_RATE_LIMIT",
@@ -41,13 +43,37 @@ _SERVER_RETRY_BACKOFF_SECONDS = (0.5, 1.0, 2.0, 4.0)
 _RATE_LIMIT_BACKOFF_SECONDS = (10.0, 30.0, 60.0, 120.0)
 
 
+def _error_category(code: str) -> str:
+    if code.startswith("API_") or code in {
+            "AUTH_ERROR", "MODEL_NOT_FOUND", "PROVIDER_FORBIDDEN",
+            "STRUCTURED_OUTPUT_UNSUPPORTED", "EMPTY_RESPONSE"}:
+        return "provider"
+    if code == "OUTPUT_TRUNCATED":
+        return "output_truncated"
+    if code in {"INVALID_PLAN_JSON", "INVALID_PLAN_SCHEMA", "UNKNOWN_OPERATOR"}:
+        return "plan"
+    if code in {"CELL_NOT_FOUND", "AMBIGUOUS_CELL", "UNSUPPORTED_SELECTOR",
+                "EMPTY_SELECTION", "TIE_DETECTED"}:
+        return "selection"
+    if code in {"TYPE_ERROR", "MISSING_VALUE", "UNIT_MISMATCH"}:
+        return "data_type"
+    if code in {"DIVISION_BY_ZERO", "EXECUTION_ERROR"}:
+        return "computation"
+    if code == "FORMAT_INVALID":
+        return "rendering"
+    return "pipeline"
+
+
 def _retry_backoff_seconds(error: PipelineError, http_attempt: int) -> float:
     provider_delay = error.details.get("retry_after_seconds")
     if type(provider_delay) in (int, float) and provider_delay >= 0:
         return float(provider_delay)
     schedule = (_RATE_LIMIT_BACKOFF_SECONDS if error.code == "API_RATE_LIMIT"
                 else _SERVER_RETRY_BACKOFF_SECONDS)
-    return schedule[min(http_attempt - 1, len(schedule) - 1)]
+    base = schedule[min(http_attempt - 1, len(schedule) - 1)]
+    if error.code == "API_RATE_LIMIT":
+        return base
+    return random.uniform(base * 0.8, base * 1.2)
 
 
 def _json_default(value: Any) -> Any:
@@ -73,11 +99,15 @@ def _sum_reported(values: list[int | float | None]) -> int | float | None:
     return sum(reported) if reported else None
 
 
-def _deadline_error(*, started_run: float, started_query: float | None,
+def _elapsed(timer: ActiveTimer | float) -> float:
+    return timer.elapsed() if isinstance(timer, ActiveTimer) else time.perf_counter() - timer
+
+
+def _deadline_error(*, started_run: ActiveTimer | float,
+                    started_query: ActiveTimer | float | None,
                     limits: RuntimeLimits, query_id: str | None = None,
                     stage: str = "execute") -> PipelineError | None:
-    now = time.perf_counter()
-    run_elapsed = now - started_run
+    run_elapsed = _elapsed(started_run)
     if run_elapsed >= limits.run_timeout_seconds:
         return PipelineError(code="RUN_TIMEOUT", stage=stage,
                              message=f"Run exceeded {limits.run_timeout_seconds} seconds",
@@ -85,7 +115,7 @@ def _deadline_error(*, started_run: float, started_query: float | None,
                              details={"elapsed_seconds": run_elapsed,
                                       "timeout_seconds": limits.run_timeout_seconds})
     if started_query is not None:
-        query_elapsed = now - started_query
+        query_elapsed = _elapsed(started_query)
         if query_elapsed >= limits.query_timeout_seconds:
             return PipelineError(code="QUERY_TIMEOUT", stage=stage,
                                  message=f"Query exceeded {limits.query_timeout_seconds} seconds",
@@ -95,7 +125,8 @@ def _deadline_error(*, started_run: float, started_query: float | None,
     return None
 
 
-def _check_deadline(*, started_run: float, started_query: float | None,
+def _check_deadline(*, started_run: ActiveTimer | float,
+                    started_query: ActiveTimer | float | None,
                     limits: RuntimeLimits, query_id: str | None = None,
                     stage: str = "execute") -> None:
     error = _deadline_error(started_run=started_run, started_query=started_query,
@@ -104,17 +135,17 @@ def _check_deadline(*, started_run: float, started_query: float | None,
         raise error
 
 
-def _remaining_request_timeout(*, started_run: float, started_query: float,
+def _remaining_request_timeout(*, started_run: ActiveTimer | float,
+                               started_query: ActiveTimer | float,
                                limits: RuntimeLimits, query_id: str) -> float:
     _check_deadline(started_run=started_run, started_query=started_query,
                     limits=limits, query_id=query_id, stage="llm")
-    now = time.perf_counter()
     return min(float(limits.request_timeout_seconds),
-               started_run + limits.run_timeout_seconds - now,
-               started_query + limits.query_timeout_seconds - now)
+               limits.run_timeout_seconds - _elapsed(started_run),
+               limits.query_timeout_seconds - _elapsed(started_query))
 
 
-def _check_run_deadline(started_run: float, limits: RuntimeLimits) -> None:
+def _check_run_deadline(started_run: ActiveTimer | float, limits: RuntimeLimits) -> None:
     error = _deadline_error(started_run=started_run, started_query=None,
                             limits=limits, stage="collect")
     if error is not None:
@@ -186,19 +217,28 @@ def _load_labels(labels_path: Path | None, query_ids: set[str]) -> dict[str, str
 
 
 def _write_submission(path: Path, rows: list[dict[str, Any]], *, before_commit=None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    identifiers = [row.get("query_id") for row in rows]
+    if (any(not isinstance(query_id, str) or not query_id for query_id in identifiers)
+            or len(set(identifiers)) != len(identifiers)):
+        raise PipelineError(code="FORMAT_INVALID", stage="collect",
+                            message="Submission rows must contain unique non-empty query IDs")
+    if any(row.get("answer") is not None and not isinstance(row.get("answer"), str) for row in rows):
+        raise PipelineError(code="FORMAT_INVALID", stage="collect",
+                            message="Submission answers must be strings or null failures")
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(buffer, fieldnames=["id", "answer"], lineterminator="\r\n", extrasaction="raise")
     writer.writeheader()
     for row in rows:
-        writer.writerow({"id": row["query_id"], "answer": row["answer"]})
+        writer.writerow({"id": row["query_id"], "answer": row["answer"] or ""})
     content = buffer.getvalue()
     round_trip = list(csv.DictReader(io.StringIO(content, newline="")))
-    expected = [{"id": row["query_id"], "answer": row["answer"]} for row in rows]
+    expected = [{"id": row["query_id"], "answer": row["answer"] or ""} for row in rows]
     if round_trip != expected:
         raise PipelineError(code="FORMAT_INVALID", stage="collect", message="Submission CSV failed its round-trip check")
-    temporary_path = path.with_name(path.name + ".tmp")
+    temporary_path = path.with_name(path.name + f".{uuid.uuid4().hex}.tmp")
     try:
-        temporary_path.write_text(content, encoding="utf-8-sig", newline="")
+        temporary_path.write_text(content, encoding="utf-8", newline="")
         if before_commit is not None:
             before_commit()
         temporary_path.replace(path)
@@ -227,7 +267,10 @@ def run_offline(*, queries_path: Path, data_dir: Path, input_mode: str = "raw", 
                 llm_config: LLMConfig | None = None, run_profile: str = "development",
                 prompt_variant: str = "A", max_rss_mb: int | None = None,
                 expected_query_count: int | None = None,
-                expected_workbook_count: int | None = None) -> Path:
+                expected_workbook_count: int | None = None,
+                output_path: Path | None = None,
+                submission_policy: str = "fail_run",
+                quota_gate: RequestQuotaGate | None = None) -> Path:
     if input_mode not in ("raw", "parsed") or answer_mode not in ("plan_tools", "direct"):
         raise PipelineError(code="INVALID_QUERY", stage="load", message="Unsupported input or answer mode")
     if prompt_variant not in {"A", "B"} or (answer_mode == "direct" and prompt_variant != "A"):
@@ -251,7 +294,10 @@ def run_offline(*, queries_path: Path, data_dir: Path, input_mode: str = "raw", 
             and (type(expected_workbook_count) is not int or expected_workbook_count < 1)):
         raise PipelineError(code="INVALID_QUERY", stage="load",
                             message="expected_workbook_count must be a positive integer when set")
-    started_run = time.perf_counter()
+    if submission_policy not in {"fail_run", "emit_all_rows"}:
+        raise PipelineError(code="INVALID_QUERY", stage="load",
+                            message="submission_policy must be fail_run or emit_all_rows")
+    started_run = ActiveTimer(clock=time.perf_counter)
     work = load_queries(queries_path, data_dir)
     if not work:
         raise PipelineError(code="INVALID_QUERY", stage="load", message="Query input is empty")
@@ -268,6 +314,9 @@ def run_offline(*, queries_path: Path, data_dir: Path, input_mode: str = "raw", 
                                      "actual_workbook_count": workbook_count})
     labels = _load_labels(labels_path, {query.id for query, _ in work})
     backend: LLMClient = MeasuredClient(client or MockLLMClient())
+    provider_options = settings.provider_options.get(settings.provider, {})
+    configured_rate_limit = rate_limit_settings(settings.provider, provider_options)
+    request_gate = quota_gate or build_quota_gate(settings.provider, provider_options)
     raw_adapter, parsed_adapter = RawWorkbookAdapter(), ParsedTableAdapter()
     table_cache: dict[Path, TableContext] = {}
     view_cache: dict[Path, Any] = {}
@@ -282,32 +331,55 @@ def run_offline(*, queries_path: Path, data_dir: Path, input_mode: str = "raw", 
     budget = RunBudget()
     errors: list[dict[str, str]] = []
     api_retries = 0
+    fatal_run_error: PipelineError | None = None
 
     for query, workbook_path in work:
-        started_query = time.perf_counter()
+        started_query = ActiveTimer(clock=time.perf_counter)
+        query_quota_wait_seconds = 0.0
         context: QueryContext | None = None
         responses: list[LLMResponse] = []
         call_elapsed_ms: list[float] = []
         calls = 0
         repair_calls = 0
         unknown_calls = 0
+        estimated_input_tokens_total = 0
+        actual_input_tokens_total = 0
         prompt_version = (("planner_v1" if prompt_variant == "A" else "planner_v1_b")
                           if answer_mode == "plan_tools" else "direct_v1")
         outcome: dict[str, Any]
 
         def generate(request, *, purpose: str) -> LLMResponse:
-            nonlocal calls, repair_calls, unknown_calls, api_retries
+            nonlocal calls, repair_calls, unknown_calls, api_retries, query_quota_wait_seconds
+            nonlocal estimated_input_tokens_total, actual_input_tokens_total
             calls += 1
             if purpose == "plan_repair":
                 repair_calls += 1
             prompt_hash = sha256((request.system_prompt + "\0" + request.user_prompt).encode("utf-8")).hexdigest()
             output_token_limit = request.max_output_tokens
             for http_attempt in range(1, runtime_limits.max_api_attempts + 1):
+                candidate_request = replace(request, max_output_tokens=output_token_limit)
+                estimated_input_tokens = estimate_input_tokens(candidate_request)
+
+                def log_wait(reason: str, wait_seconds: float) -> None:
+                    _log(logs_path, {"query_id": query.id, "event": "quota_wait_started",
+                                     "provider": settings.provider, "reason": reason,
+                                     "wait_seconds": wait_seconds,
+                                     "estimated_input_tokens": estimated_input_tokens}, stamp)
+
+                admission = request_gate.acquire(estimated_input_tokens, wait_hook=log_wait)
+                estimated_input_tokens_total += estimated_input_tokens
+                if admission.waited_seconds:
+                    started_run.exclude(admission.waited_seconds)
+                    started_query.exclude(admission.waited_seconds)
+                    query_quota_wait_seconds += admission.waited_seconds
+                    _log(logs_path, {"query_id": query.id, "event": "quota_wait_finished",
+                                     "provider": settings.provider,
+                                     "reason": admission.wait_reason,
+                                     "waited_seconds": admission.waited_seconds}, stamp)
                 timeout_seconds = _remaining_request_timeout(
                     started_run=started_run, started_query=started_query,
                     limits=runtime_limits, query_id=query.id)
-                attempt_request = replace(request, timeout_seconds=timeout_seconds,
-                                          max_output_tokens=output_token_limit)
+                attempt_request = replace(candidate_request, timeout_seconds=timeout_seconds)
                 _log(logs_path, {"query_id": query.id, "event": "llm_call_started", "call_index": calls,
                                  "call_purpose": purpose, "http_attempt": http_attempt,
                                  "provider": settings.provider, "model_requested": settings.model,
@@ -331,13 +403,16 @@ def run_offline(*, queries_path: Path, data_dir: Path, input_mode: str = "raw", 
                     error.details.setdefault("llm_elapsed_ms", measured_ms)
                     can_retry = (settings.provider != "mock"
                                  and error.code in _RETRYABLE_API_ERRORS
+                                 and error.details.get("retryable", True) is not False
                                  and http_attempt < runtime_limits.max_api_attempts)
                     backoff_seconds = _retry_backoff_seconds(error, http_attempt)
                     if can_retry:
                         remaining = _remaining_request_timeout(
                             started_run=started_run, started_query=started_query,
                             limits=runtime_limits, query_id=query.id)
-                        can_retry = remaining > backoff_seconds
+                        can_retry = (backoff_seconds <= configured_rate_limit.max_wait_seconds
+                                     if error.code == "API_RATE_LIMIT"
+                                     else remaining > backoff_seconds)
                     _log(logs_path, {"query_id": query.id, "event": "llm_call_error", "call_index": calls,
                                      "call_purpose": purpose, "http_attempt": http_attempt,
                                      "provider": settings.provider, "model_requested": settings.model,
@@ -360,7 +435,24 @@ def run_offline(*, queries_path: Path, data_dir: Path, input_mode: str = "raw", 
                                      "backoff_seconds": backoff_seconds,
                                      "next_max_output_tokens": output_token_limit,
                                      "error_code": error.code}, stamp)
+                    wait_started = time.perf_counter()
+                    if error.code == "API_RATE_LIMIT":
+                        _log(logs_path, {"query_id": query.id, "event": "quota_wait_started",
+                                         "provider": settings.provider,
+                                         "reason": "provider_429",
+                                         "quota_scope": error.details.get("quota_scope", "unknown"),
+                                         "wait_seconds": backoff_seconds}, stamp)
                     time.sleep(backoff_seconds)
+                    if error.code == "API_RATE_LIMIT":
+                        waited_seconds = max(0.0, time.perf_counter() - wait_started)
+                        started_run.exclude(waited_seconds)
+                        started_query.exclude(waited_seconds)
+                        query_quota_wait_seconds += waited_seconds
+                        _log(logs_path, {"query_id": query.id, "event": "quota_wait_finished",
+                                         "provider": settings.provider,
+                                         "reason": "provider_429",
+                                         "quota_scope": error.details.get("quota_scope", "unknown"),
+                                         "waited_seconds": waited_seconds}, stamp)
                     continue
                 except Exception as exc:
                     elapsed_ms = (time.perf_counter() - call_started) * 1000
@@ -376,6 +468,7 @@ def run_offline(*, queries_path: Path, data_dir: Path, input_mode: str = "raw", 
                                               query_id=query.id)
                     can_retry = (settings.provider != "mock"
                                  and error.code in _RETRYABLE_API_ERRORS
+                                 and error.details.get("retryable", True) is not False
                                  and http_attempt < runtime_limits.max_api_attempts)
                     backoff_seconds = _retry_backoff_seconds(error, http_attempt)
                     if can_retry:
@@ -401,6 +494,17 @@ def run_offline(*, queries_path: Path, data_dir: Path, input_mode: str = "raw", 
                     time.sleep(backoff_seconds)
                     continue
                 call_elapsed_ms.append(response.llm_elapsed_ms)
+                actual_input_tokens = response.usage.prompt_tokens
+                if actual_input_tokens is not None:
+                    actual_input_tokens_total += actual_input_tokens
+                    if actual_input_tokens > admission.reserved_input_tokens:
+                        _log(logs_path, {"query_id": query.id,
+                                         "event": "quota_token_estimate_underflow",
+                                         "provider": settings.provider,
+                                         "estimated_input_tokens": estimated_input_tokens,
+                                         "reserved_input_tokens": admission.reserved_input_tokens,
+                                         "actual_input_tokens": actual_input_tokens}, stamp)
+                request_gate.commit(admission, response.usage.prompt_tokens)
                 all_call_elapsed_ms.append(response.llm_elapsed_ms)
                 responses.append(response)
                 all_responses.append(response)
@@ -459,6 +563,7 @@ def run_offline(*, queries_path: Path, data_dir: Path, input_mode: str = "raw", 
                 current_plan: dict[str, Any] | None = None
                 last_error: PipelineError | None = None
                 execution = None
+                answer: str | None = None
                 repair_pending = False
                 while True:
                     purpose = "plan_repair" if repair_pending else "initial"
@@ -479,6 +584,19 @@ def run_offline(*, queries_path: Path, data_dir: Path, input_mode: str = "raw", 
                                          "previous_max_output_tokens": request.max_output_tokens,
                                          "next_max_output_tokens": expanded_request.max_output_tokens}, stamp)
                         response = generate(expanded_request, purpose="output_retry")
+                        if str(response.finish_reason or "").upper() in {
+                                "MAX_TOKENS", "MAX_OUTPUT_TOKENS", "LENGTH"}:
+                            _log(logs_path, {"query_id": query.id, "event": "output_truncated",
+                                             "plan_attempt": calls,
+                                             "finish_reason": response.finish_reason,
+                                             "max_output_tokens": expanded_request.max_output_tokens}, stamp)
+                            raise PipelineError(
+                                code="OUTPUT_TRUNCATED", stage="llm",
+                                message="Planner output remained truncated after the enlarged output retry",
+                                query_id=query.id,
+                                details={"finish_reason": response.finish_reason,
+                                         "max_output_tokens": expanded_request.max_output_tokens},
+                            )
                     repair_pending = False
                     last_error = None
                     try:
@@ -509,7 +627,14 @@ def run_offline(*, queries_path: Path, data_dir: Path, input_mode: str = "raw", 
                         else:
                             _check_deadline(started_run=started_run, started_query=started_query,
                                             limits=runtime_limits, query_id=query.id, stage="execute")
-                            break
+                            try:
+                                answer = format_runtime_answer(
+                                    execution.value, plan_data["return"].get("format"))
+                            except PipelineError as exc:
+                                exc.query_id = query.id
+                                last_error = exc
+                            else:
+                                break
 
                     _check_deadline(started_run=started_run, started_query=started_query,
                                     limits=runtime_limits, query_id=query.id, stage="execute")
@@ -535,12 +660,10 @@ def run_offline(*, queries_path: Path, data_dir: Path, input_mode: str = "raw", 
                 _log(logs_path, {"query_id": query.id, "event": "execution_complete",
                                  "execution_artifact": str(executions_path),
                                  "final_evidence": execution_artifact["evidence"],
+                                 "return_format": plan_data["return"].get("format"),
+                                 "final_answer": answer,
                                  "trace": [trace.to_dict() for trace in execution.trace]}, stamp)
-                try:
-                    answer = format_answer(execution.value, context.answer_spec)
-                except PipelineError as exc:
-                    exc.query_id = query.id
-                    raise
+                assert answer is not None
                 _check_deadline(started_run=started_run, started_query=started_query,
                                 limits=runtime_limits, query_id=query.id, stage="format")
                 outcome = {"status": "ok", "answer": answer, "format_valid": True, "exact_match": None,
@@ -556,6 +679,8 @@ def run_offline(*, queries_path: Path, data_dir: Path, input_mode: str = "raw", 
             outcome = {"status": "error", "answer": None, "format_valid": False, "exact_match": None,
                        "error": exc.to_dict(), "plan_valid": False if answer_mode == "plan_tools" else None,
                        "execution_artifact": None, "final_evidence": []}
+            if exc.code == "API_RATE_LIMIT" and exc.details.get("quota_scope") == "day":
+                fatal_run_error = exc
         except (OSError, ValueError, KeyError) as exc:
             error = _deadline_error(started_run=started_run, started_query=started_query,
                                     limits=runtime_limits, query_id=query.id,
@@ -580,38 +705,56 @@ def run_offline(*, queries_path: Path, data_dir: Path, input_mode: str = "raw", 
                         "actual_cost_usd_known_partial": known_actual_cost,
                         "estimated_cost_usd": None,
                         "llm_elapsed_ms": _sum_known(call_elapsed_ms),
-                        "total_elapsed_ms": (time.perf_counter() - started_query) * 1000,
+                        "active_elapsed_ms": started_query.elapsed() * 1000,
+                        "quota_wait_ms": query_quota_wait_seconds * 1000,
+                        "wall_elapsed_ms": started_query.wall_elapsed() * 1000,
+                        "estimated_input_tokens": estimated_input_tokens_total,
+                        "actual_input_tokens": actual_input_tokens_total,
+                        "total_elapsed_ms": started_query.elapsed() * 1000,
                         "table_view_hash": context.context_meta.table_view_hash if context else None,
                         "prompt_version": prompt_version, "trace_path": str(logs_path)})
         if labels is not None and query.id in labels:
             # Keep labeled failures in the Exact Match denominator as incorrect.
             outcome["exact_match"] = outcome["status"] == "ok" and outcome["answer"] == labels[query.id]
         if outcome["status"] == "error":
-            errors.append({"query_id": query.id, "code": outcome["error"]["code"]})
+            error_code = outcome["error"]["code"]
+            errors.append({"query_id": query.id, "code": error_code,
+                           "category": _error_category(error_code)})
             _log(logs_path, {"query_id": query.id, "event": "query_error", "error": outcome["error"]}, stamp)
         outcomes.append(outcome)
         with results_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps(outcome, ensure_ascii=False, allow_nan=False, default=_json_default) + "\n")
+        if fatal_run_error is not None:
+            break
 
     completed = sum(row["status"] == "ok" for row in outcomes)
-    failed = len(outcomes) - completed
-    run_error = _deadline_error(started_run=started_run, started_query=None,
-                                limits=runtime_limits, stage="collect")
+    failed = (len(work) - completed if fatal_run_error is not None
+              else len(outcomes) - completed)
+    run_error = fatal_run_error or _deadline_error(
+        started_run=started_run, started_query=None, limits=runtime_limits, stage="collect")
     if run_error is None:
         try:
             _check_memory_limit(max_rss_mb, query_id=None, stage="collect")
         except PipelineError as exc:
             run_error = exc
-    if failed == 0 and run_error is None:
+    should_emit = ((failed == 0 and run_error is None)
+                   or (submission_policy == "emit_all_rows" and len(outcomes) == len(work)))
+    submission_target = Path(output_path) if output_path is not None else run_dir / "submission.csv"
+    if should_emit:
         try:
-            _write_submission(run_dir / "submission.csv", outcomes,
-                              before_commit=lambda: (_check_run_deadline(started_run, runtime_limits),
-                                                     _check_memory_limit(max_rss_mb, query_id=None, stage="collect")))
+            before_commit = None
+            if submission_policy == "fail_run":
+                before_commit = lambda: (_check_run_deadline(started_run, runtime_limits),
+                                         _check_memory_limit(max_rss_mb, query_id=None, stage="collect"))
+            _write_submission(submission_target, outcomes, before_commit=before_commit)
         except PipelineError as exc:
             run_error = exc
     labeled = [row for row in outcomes if row["exact_match"] is not None]
     exact_match = (sum(row["exact_match"] is True for row in labeled) / len(labeled)) if labeled else None
     usage_total = budget.usage
+    error_distribution: dict[str, int] = {}
+    for item in errors:
+        error_distribution[item["category"]] = error_distribution.get(item["category"], 0) + 1
     summary = {
         "run_id": stamp, "execution": "m4_multi_provider_answer_pipeline", "input_mode": input_mode,
         "answer_mode": answer_mode, "run_status": "error" if failed or run_error else "ok",
@@ -633,10 +776,15 @@ def run_offline(*, queries_path: Path, data_dir: Path, input_mode: str = "raw", 
         "actual_cost_usd": budget.actual_cost_usd, "estimated_cost_usd": None,
         "actual_cost_usd_known_partial": budget.known_actual_cost_usd,
         "llm_elapsed_ms_total": _sum_known(all_call_elapsed_ms),
-        "run_wall_time_ms": (time.perf_counter() - started_run) * 1000,
+        "run_active_elapsed_ms": started_run.elapsed() * 1000,
+        "quota_wait_ms_total": started_run.excluded_seconds * 1000,
+        "run_wall_time_ms": started_run.wall_elapsed() * 1000,
+        "estimated_input_tokens_total": sum(row["estimated_input_tokens"] for row in outcomes),
+        "actual_input_tokens_total": sum(row["actual_input_tokens"] for row in outcomes),
         "peak_rss_mb": peak_rss_mb(),
         "runtime_limits": runtime_limits.to_dict(), "errors": errors,
-        "submission_path": "submission.csv" if failed == 0 and run_error is None else None,
+        "error_distribution": error_distribution,
+        "submission_path": str(submission_target) if should_emit and submission_target.exists() else None,
         "runtime_config": {"run_profile": run_profile, "provider": settings.provider,
                            "model": settings.model, "json_mode": settings.json_mode,
                            "prompt_variant": prompt_variant,
@@ -647,16 +795,20 @@ def run_offline(*, queries_path: Path, data_dir: Path, input_mode: str = "raw", 
                            "max_planner_repair_calls": runtime_limits.max_planner_repair_calls,
                            "max_rss_mb": max_rss_mb,
                            "expected_query_count": expected_query_count,
-                           "expected_workbook_count": expected_workbook_count},
+                           "expected_workbook_count": expected_workbook_count,
+                           "submission_policy": submission_policy,
+                           "rate_limit": configured_rate_limit.__dict__},
         "note": "Provider usage/cost fields are normalized when supplied; unknown costs remain null. Public labels are evaluation-only and are never included in prompts.",
     }
     (run_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     final_peak = peak_rss_mb()
     summary["peak_rss_mb"] = final_peak
     if max_rss_mb is not None and (final_peak is None or final_peak >= max_rss_mb):
-        (run_dir / "submission.csv").unlink(missing_ok=True)
+        if submission_policy == "fail_run":
+            submission_target.unlink(missing_ok=True)
         summary["run_status"] = "error"
-        summary["submission_path"] = None
+        if submission_policy == "fail_run":
+            summary["submission_path"] = None
         if summary["run_error"] is None:
             summary["run_error"] = PipelineError(
                 code="RESOURCE_LIMIT", stage="collect",

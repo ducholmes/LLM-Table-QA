@@ -12,7 +12,8 @@
         "category",
         "ordered_labels",
         "number_pair",
-        "decimal_pair"
+        "decimal_pair",
+        "generic_string"
       ]
     },
     "decimals": {
@@ -160,7 +161,8 @@
               "fixed_decimal",
               "yes_no",
               "last_name",
-              "category"
+              "category",
+              "generic_string"
             ]
           }
         }

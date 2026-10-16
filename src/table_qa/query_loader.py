@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 from .contracts import PipelineError, Query
 from .contract_validation import validate_query
+from .json_utils import strict_json_loads
 
 
 def load_queries(path: Path, data_dir: Path) -> list[tuple[Query, Path]]:
@@ -18,10 +18,10 @@ def load_queries(path: Path, data_dir: Path) -> list[tuple[Query, Path]]:
     try:
         root = data_dir.resolve(strict=True)
         query_path = path.resolve(strict=True)
-        payload = json.loads(query_path.read_text(encoding="utf-8"))
+        payload = strict_json_loads(query_path.read_text(encoding="utf-8"))
     except (FileNotFoundError, RuntimeError) as exc:
         raise PipelineError(code="INVALID_QUERY", stage="load", message=f"Input file not found: {exc.filename}") from exc
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, ValueError) as exc:
         raise PipelineError(code="INVALID_QUERY", stage="load", message=f"Cannot read queries: {exc}") from exc
     if not isinstance(payload, list):
         raise PipelineError(code="INVALID_QUERY", stage="load", message="queries.json must contain an array")
@@ -29,7 +29,13 @@ def load_queries(path: Path, data_dir: Path) -> list[tuple[Query, Path]]:
     seen: set[str] = set()
     for index, raw in enumerate(payload):
         try:
-            query = validate_query(raw)
+            # The judge may attach metadata fields. Only the documented input
+            # contract is trusted or propagated to prompts.
+            core = ({key: raw[key] for key in ("id", "file_name", "query") if key in raw}
+                    if isinstance(raw, dict) else raw)
+            if isinstance(core, dict) and type(core.get("id")) is int:
+                core["id"] = str(core["id"])
+            query = validate_query(core)
             if query.id in seen:
                 raise PipelineError(code="INVALID_QUERY", stage="load", message=f"Duplicate query id: {query.id}", query_id=query.id)
             try:

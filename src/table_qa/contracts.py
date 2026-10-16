@@ -18,16 +18,16 @@ InputMode = Literal["raw", "parsed"]
 AnswerMode = Literal["plan_tools", "direct"]
 Provider = Literal["openrouter", "gemini", "mock"]
 ValueType = Literal["number", "date", "string", "boolean", "empty", "error"]
-AnswerKind = Literal["integer", "fixed_decimal", "yes_no", "last_name", "category", "ordered_labels", "number_pair", "decimal_pair"]
+AnswerKind = Literal["integer", "fixed_decimal", "yes_no", "last_name", "category", "ordered_labels", "number_pair", "decimal_pair", "generic_string"]
 Stage = Literal["load", "context", "llm", "plan_validate", "resolve", "execute", "format", "collect"]
 ErrorCode = Literal[
     "AUTH_ERROR", "MODEL_NOT_FOUND", "STRUCTURED_OUTPUT_UNSUPPORTED", "EMPTY_RESPONSE",
     "PROVIDER_FORBIDDEN", "INVALID_QUERY", "TABLE_NOT_FOUND", "INVALID_TABLE_CONTEXT",
     "CONTEXT_TOO_LARGE", "ANSWER_SPEC_UNSUPPORTED", "INVALID_PLAN_JSON",
-    "INVALID_PLAN_SCHEMA", "UNKNOWN_OPERATOR", "UNSUPPORTED_SELECTOR", "CELL_NOT_FOUND",
+    "INVALID_PLAN_SCHEMA", "OUTPUT_TRUNCATED", "UNKNOWN_OPERATOR", "UNSUPPORTED_SELECTOR", "CELL_NOT_FOUND",
     "AMBIGUOUS_CELL", "MISSING_VALUE", "TYPE_ERROR", "UNIT_MISMATCH", "DIVISION_BY_ZERO",
     "EMPTY_SELECTION", "TIE_DETECTED", "RESOURCE_LIMIT", "EXECUTION_ERROR", "API_TIMEOUT",
-    "API_RATE_LIMIT", "API_SERVER_ERROR", "FORMAT_INVALID", "BUDGET_EXCEEDED",
+    "API_RATE_LIMIT", "API_BAD_REQUEST", "API_SERVER_ERROR", "FORMAT_INVALID", "BUDGET_EXCEEDED",
     "QUERY_TIMEOUT", "RUN_TIMEOUT",
 ]
 Operator = Literal[
@@ -51,7 +51,11 @@ def _runtime_family(value: Any) -> str:
 
 
 def validate_runtime_value(value: Any) -> None:
-    """Enforce bounded-depth, homogeneous runtime collections and artifact tags."""
+    """Enforce bounded-depth runtime collections and artifact tags.
+
+    Flat scalar collections may mix scalar families so a plan can return
+    tuples such as ``[label, value]`` without inventing a record type.
+    """
     def record(item: dict) -> None:
         if "$type" in item or any(not isinstance(k, str) or not k for k in item):
             raise ValueError("Record fields must be nonempty strings; $type is reserved")
@@ -69,9 +73,10 @@ def validate_runtime_value(value: Any) -> None:
                 if set(item) != set(value[0]):
                     raise ValueError("Record collections must have consistent fields")
         else:
-            families = {_runtime_family(v) for v in value if v is not None}
-            if len(families) > 1:
-                raise ValueError("Scalar collections must have compatible types")
+            for item in value:
+                if isinstance(item, (dict, list)):
+                    raise ValueError("Scalar collections cannot contain records or nested collections")
+                _runtime_family(item)
     else:
         _runtime_family(value)
 
@@ -405,8 +410,14 @@ class PlanStep(TypedDict):
     args: dict[str, Any]
 
 
-class PlanReturn(TypedDict):
+class PlanReturnFormat(TypedDict, total=False):
+    separator: str
+    decimal_places: int
+
+
+class PlanReturn(TypedDict, total=False):
     ref: str
+    format: PlanReturnFormat
 
 
 # `return` is a Python keyword, so use the functional TypedDict syntax.

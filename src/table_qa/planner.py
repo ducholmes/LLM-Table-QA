@@ -17,7 +17,7 @@ PROMPT_PATH = Path(__file__).with_name("prompts") / f"{PROMPT_VERSION}.txt"
 OPERATOR_GUIDE = """\
 - lookup_cell: read one cell; args {sheet, cell}.
 - select_records: read a row range into records; args {sheet, row_range, fields}; each field maps to a column selector and optional as_type.
-- collect: build a list from literals or whole-step references; args {items}. Never use paths like $s1.name or wrappers like {col: ...}; project fields first.
+- collect: build a flat scalar list or a consistent record list from literals or whole-step references; args {items}. A final scalar list may mix labels and numbers. Never use paths like $s1.name; project fields first.
 - derive: add a calculated field to every record; args {source, field, fn, inputs}. Use date_diff_days for exact age ranking.
 - add/subtract/abs_diff/divide: scalar arithmetic; args {left, right}.
 - aggregate: reduce a scalar list or record field; args {source, fn, optional field}.
@@ -30,14 +30,14 @@ OPERATOR_GUIDE = """\
 
 REFERENCE EXAMPLES:
 1. Exact age: select birth/admission -> derive date_diff_days -> sort -> take -> project.
-2. Collect fields: project each field into a step, then collect {items: ["$s2", "$s3"]}.
+2. Label plus value: project each scalar into a step, then collect {items: ["$s2", "$s3"]} in the exact answer order.
 3. Subtotals: select either a parent total or its non-overlapping children, never both.
 4. Multi-row headers: match the complete header path and requested endpoint periods before choosing a column.
 """
 REPAIRABLE_ERRORS = {
     "INVALID_PLAN_JSON", "INVALID_PLAN_SCHEMA", "UNKNOWN_OPERATOR", "UNSUPPORTED_SELECTOR",
     "CELL_NOT_FOUND", "AMBIGUOUS_CELL", "MISSING_VALUE", "TYPE_ERROR", "DIVISION_BY_ZERO",
-    "EMPTY_SELECTION", "TIE_DETECTED",
+    "EMPTY_SELECTION", "TIE_DETECTED", "FORMAT_INVALID",
 }
 DIRECT_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -63,7 +63,7 @@ def _base_user_prompt(context: QueryContext) -> str:
     return "\n".join((
         f"QUERY_ID: {context.query_id}", f"TABLE_ID: {context.table_id}", "ANSWER_MODE=plan_tools",
         "QUESTION_JSON: " + json.dumps(context.query, ensure_ascii=False),
-        "EXPECTED_ANSWER_SPEC: " + json.dumps(context.answer_spec.to_dict(), ensure_ascii=False),
+        "OUTPUT_CONTRACT: Follow the explicit order, precision, separator, and units requested by QUESTION_JSON. Declare only separator/decimal_places in return.format when needed.",
         f"INPUT_MODE: {context.input_mode}", "TABLE_CONTEXT:", context.table_view,
     ))
 
@@ -78,8 +78,9 @@ def build_plan_request(context: QueryContext, *, model: str = "mock", repair_pla
         error_json = json.dumps(repair_error.to_dict(), ensure_ascii=False, default=str)
         plan_json = json.dumps(repair_plan, ensure_ascii=False, default=str)
         user_prompt += (
-            "\n\nYour previous plan failed local validation or execution. Revise the plan once. "
-            "Use the same question and full table above. Do not answer directly."
+            "\n\nYour previous plan failed local validation, execution, or final rendering. Revise the plan once. "
+            "Use the same question and full table above. Preserve correct earlier work when possible. "
+            "For a final-shape failure, fix project/collect/return.format. Do not answer directly."
             "\nFAILED_PLAN_JSON:\n" + plan_json + "\nOBSERVED_ERROR_JSON:\n" + error_json
         )
     return LLMRequest(system_prompt=planner_system_prompt(prompt_variant), user_prompt=user_prompt, model=model,

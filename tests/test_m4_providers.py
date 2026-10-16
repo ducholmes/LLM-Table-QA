@@ -11,6 +11,7 @@ from table_qa.config import LLMConfig, load_config, validate_config
 from table_qa.contract_validation import load_schema
 from table_qa.contracts import LLMRequest, PipelineError, RuntimeLimits
 from table_qa.llm.factory import LLMBackendFactory
+from table_qa.llm.errors import map_provider_error
 from table_qa.llm.gemini_client import GeminiClient
 from table_qa.llm.openrouter_client import OpenRouterClient
 from table_qa.runner import run_offline
@@ -58,6 +59,49 @@ def llm_request(*, provider="openrouter", mode="json_object", timeout=4.5):
 
 
 class M4ProviderTests(unittest.TestCase):
+    def test_bad_request_preserves_safe_provider_diagnostics_and_is_not_retryable(self):
+        class ClientError(Exception):
+            code = 400
+            status = "INVALID_ARGUMENT"
+            message = ("Invalid value at 'generation_config.response_schema': "
+                       "schema exceeds the supported complexity")
+
+        error = map_provider_error(ClientError("raw response"), provider="gemini")
+        self.assertEqual(error.code, "API_BAD_REQUEST")
+        self.assertEqual(error.details["http_status"], 400)
+        self.assertEqual(error.details["provider_status"], "INVALID_ARGUMENT")
+        self.assertIn("schema exceeds the supported complexity",
+                      error.details["provider_message"])
+        self.assertIn("schema exceeds the supported complexity", error.message)
+        self.assertFalse(error.details["retryable"])
+
+        leaked = ClientError("raw response")
+        leaked.message = "Invalid credential AIza123456789012345678901234567890123456"
+        redacted = map_provider_error(leaked, provider="gemini")
+        self.assertNotIn("AIza", str(redacted.to_dict()))
+        self.assertIn("[REDACTED_API_KEY]", redacted.details["provider_message"])
+
+    def test_rate_limit_mapping_distinguishes_minute_and_daily_quota(self):
+        class MinuteLimit(Exception):
+            status_code = 429
+            reason = "RATE_LIMIT_EXCEEDED: requests_per_minute"
+            headers = {"Retry-After": "1.5"}
+
+        minute = map_provider_error(MinuteLimit("private detail"), provider="gemini")
+        self.assertEqual(minute.details["quota_scope"], "minute")
+        self.assertEqual(minute.details["provider_reason"], "minute_rate_limit_exceeded")
+        self.assertTrue(minute.details["retryable"])
+        self.assertEqual(minute.details["retry_after_seconds"], 1.5)
+
+        class DailyLimit(Exception):
+            status_code = 429
+            details = [{"quotaId": "GenerateRequestsPerDayPerProjectPerModel-FreeTier"}]
+
+        daily = map_provider_error(DailyLimit("private detail"), provider="gemini")
+        self.assertEqual(daily.details["quota_scope"], "day")
+        self.assertEqual(daily.details["provider_reason"], "daily_quota_exhausted")
+        self.assertFalse(daily.details["retryable"])
+
     def test_openrouter_normalizes_usage_sets_timeout_and_requests_json_schema(self):
         response = NS(
             id="req-1", model="qwen/qwen3.7-flash", choices=[NS(
@@ -183,16 +227,19 @@ class M4ProviderTests(unittest.TestCase):
         self.assertIsInstance(openrouter, OpenRouterClient)
         self.assertIsInstance(gemini, GeminiClient)
 
-    def test_configs_load_and_competition_profile_is_locked(self):
+    def test_configs_load_and_submission_profile_is_locked(self):
         root = Path(__file__).resolve().parents[1]
         self.assertEqual(load_config(root / "config/default.yaml").llm.provider, "mock")
         self.assertEqual(load_config(root / "config/benchmark_gemini.yaml").llm.provider, "gemini")
         self.assertEqual(load_config(root / "config/benchmark_openrouter.yaml").llm.provider, "openrouter")
         submission = load_config(root / "config/submission.yaml")
-        self.assertEqual(submission.run_profile, "competition")
+        self.assertEqual(submission.run_profile, "submission")
         self.assertEqual(submission.llm.model, "qwen/qwen3.7-flash")
+        self.assertIsNone(submission.expected_query_count)
+        self.assertIsNone(submission.expected_workbook_count)
+        self.assertEqual(submission.submission_policy, "emit_all_rows")
         with self.assertRaises(PipelineError):
-            validate_config({"run_profile": "competition", "llm": {
+            validate_config({"run_profile": "submission", "llm": {
                 "provider": "gemini", "model": "gemini-3.8-flash"}})
 
     def test_fake_openrouter_client_completes_the_existing_q006_pipeline(self):
@@ -304,6 +351,33 @@ class M4ProviderTests(unittest.TestCase):
             self.assertNotIn(secret, (run_dir / "logs.jsonl").read_text(encoding="utf-8"))
             self.assertFalse((run_dir / "submission.csv").exists())
 
+    def test_gemini_bad_request_is_logged_with_reason_and_not_retried(self):
+        root = Path(__file__).resolve().parents[1]
+        query = (root / "tests/fixtures/q006/query.json").read_text(encoding="utf-8")
+
+        class BadRequest(Exception):
+            code = 400
+            status = "INVALID_ARGUMENT"
+            message = "response_schema has too many states"
+
+        with tempfile.TemporaryDirectory() as temp:
+            temp_root = Path(temp)
+            queries_path = temp_root / "queries.json"
+            queries_path.write_text(f"[{query}]", encoding="utf-8")
+            sdk = FakeGeminiSDK(error=BadRequest("raw detail"))
+            run_dir = run_offline(
+                queries_path=queries_path, data_dir=root / "data/Public data 1/xlsx_files",
+                run_root=temp_root / "runs", client=GeminiClient(api_key="fake", sdk_client=sdk),
+                llm_config=LLMConfig(provider="gemini", model="gemini-3.1-flash-lite",
+                                     max_api_attempts=3),
+                limits=RuntimeLimits(max_api_attempts=3, request_timeout_seconds=5,
+                                     query_timeout_seconds=30, run_timeout_seconds=60),
+            )
+            result = json.loads((run_dir / "results.jsonl").read_text().splitlines()[0])
+            self.assertEqual(result["error"]["code"], "API_BAD_REQUEST")
+            self.assertIn("too many states", result["error"]["message"])
+            self.assertEqual(len(sdk.calls), 1)
+
     def test_transient_server_error_retries_with_backoff_then_succeeds(self):
         root = Path(__file__).resolve().parents[1]
         fixture = root / "tests/fixtures/q006"
@@ -323,7 +397,9 @@ class M4ProviderTests(unittest.TestCase):
                     candidates=[NS(finish_reason="STOP")],
                 )
 
-        with tempfile.TemporaryDirectory() as temp, patch("table_qa.runner.time.sleep") as sleep:
+        with (tempfile.TemporaryDirectory() as temp,
+              patch("table_qa.runner.time.sleep") as sleep,
+              patch("table_qa.runner.random.uniform", side_effect=lambda low, high: (low + high) / 2)):
             temp_root = Path(temp)
             queries_path = temp_root / "queries.json"
             queries_path.write_text(f"[{query}]", encoding="utf-8")
@@ -349,6 +425,82 @@ class M4ProviderTests(unittest.TestCase):
                               if event["event"] == "llm_call_started"], [1, 2, 3])
             self.assertEqual(len([event for event in events
                                   if event["event"] == "llm_retry_scheduled"]), 2)
+
+    def test_minute_429_wait_is_excluded_from_active_time_then_retries(self):
+        root = Path(__file__).resolve().parents[1]
+        fixture = root / "tests/fixtures/q006"
+        query = (fixture / "query.json").read_text(encoding="utf-8")
+        plan = (fixture / "plan_raw.json").read_text(encoding="utf-8")
+
+        class MinuteLimit(Exception):
+            status_code = 429
+            reason = "requests_per_minute"
+            headers = {"Retry-After": "0.02"}
+
+        class RateLimitThenSuccess(FakeGeminiSDK):
+            def generate_content(self, **kwargs):
+                self.calls.append(kwargs)
+                if len(self.calls) == 1:
+                    raise MinuteLimit("minute quota")
+                return NS(
+                    text=plan, model_version="gemini-3.8-flash-001", response_id="recovered",
+                    usage_metadata=NS(prompt_token_count=11, candidates_token_count=22,
+                                      total_token_count=33, thoughts_token_count=0,
+                                      cached_content_token_count=0),
+                    candidates=[NS(finish_reason="STOP")],
+                )
+
+        with tempfile.TemporaryDirectory() as temp:
+            temp_root = Path(temp)
+            queries_path = temp_root / "queries.json"
+            queries_path.write_text(f"[{query}]", encoding="utf-8")
+            sdk = RateLimitThenSuccess()
+            run_dir = run_offline(
+                queries_path=queries_path, data_dir=root / "data/Public data 1/xlsx_files",
+                run_root=temp_root / "runs", client=GeminiClient(api_key="fake", sdk_client=sdk),
+                llm_config=LLMConfig(provider="gemini", model="gemini-3.8-flash",
+                                     max_api_attempts=2),
+                limits=RuntimeLimits(max_api_attempts=2, request_timeout_seconds=5,
+                                     query_timeout_seconds=30, run_timeout_seconds=60),
+            )
+            result = json.loads((run_dir / "results.jsonl").read_text().splitlines()[0])
+            summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(len(sdk.calls), 2)
+            self.assertEqual(summary["api_retries"], 1)
+            self.assertGreaterEqual(result["quota_wait_ms"], 15)
+            self.assertGreaterEqual(result["wall_elapsed_ms"] - result["active_elapsed_ms"], 15)
+
+    def test_daily_quota_stops_run_without_retrying_later_queries(self):
+        root = Path(__file__).resolve().parents[1]
+        query = json.loads((root / "tests/fixtures/q006/query.json").read_text(encoding="utf-8"))
+        second = dict(query)
+        second["id"] = "q006_second"
+
+        class DailyLimit(Exception):
+            status_code = 429
+            details = [{"reason": "requests_per_day quota exhausted"}]
+
+        with tempfile.TemporaryDirectory() as temp:
+            temp_root = Path(temp)
+            queries_path = temp_root / "queries.json"
+            queries_path.write_text(json.dumps([query, second]), encoding="utf-8")
+            sdk = FakeGeminiSDK(error=DailyLimit("daily quota"))
+            run_dir = run_offline(
+                queries_path=queries_path, data_dir=root / "data/Public data 1/xlsx_files",
+                run_root=temp_root / "runs", client=GeminiClient(api_key="fake", sdk_client=sdk),
+                llm_config=LLMConfig(provider="gemini", model="gemini-3.8-flash",
+                                     max_api_attempts=3),
+                limits=RuntimeLimits(max_api_attempts=3, request_timeout_seconds=5,
+                                     query_timeout_seconds=30, run_timeout_seconds=60),
+            )
+            results = (run_dir / "results.jsonl").read_text().splitlines()
+            summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(results), 1)
+            self.assertEqual(len(sdk.calls), 1)
+            self.assertEqual(summary["api_retries"], 0)
+            self.assertEqual(summary["run_error"]["details"]["quota_scope"], "day")
+            self.assertFalse((run_dir / "submission.csv").exists())
 
     def test_failed_repair_marks_aggregate_usage_unknown_but_keeps_known_partial(self):
         root = Path(__file__).resolve().parents[1]

@@ -12,6 +12,8 @@ from table_qa.contract_validation import (
     validate_answer_spec, validate_plan, validate_query, validate_query_context,
     validate_table_context, validate_table_view,
 )
+from table_qa.context_builder import parse_answer_spec
+from table_qa.answer_spec import format_answer
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = Path(__file__).parent / "fixtures" / "q006"
@@ -153,11 +155,26 @@ class AnswerContractTests(unittest.TestCase):
                  self.spec("yes_no", allowed_values=["Yes", "No"]), self.spec("category"),
                  self.spec("last_name"), self.spec("ordered_labels", separator=", ", item_count=3),
                  self.spec("number_pair", separator=", ", item_count=2),
-                 self.spec("decimal_pair", decimals=2, separator=", ", item_count=2)]
+                 self.spec("decimal_pair", decimals=2, separator=", ", item_count=2),
+                 self.spec("generic_string")]
         for spec in specs:
             with self.subTest(kind=spec["kind"]):
                 answer = validate_answer_spec(spec)
                 self.assertEqual(answer, AnswerSpec.from_dict(json.loads(answer.to_json())))
+
+    def test_unknown_private_question_uses_generic_string_fallback(self):
+        spec = parse_answer_spec("Which entry best matches the requested condition?")
+        self.assertEqual(spec.kind, "generic_string")
+        self.assertEqual(format_answer(42, spec), "42")
+
+    def test_explicit_format_language_is_not_guessed_into_a_semantic_kind(self):
+        questions = (
+            "Answer as `group, difference` using exactly two decimal places.",
+            "Chỉ trả lời bằng số với đúng một chữ số thập phân.",
+            "Répondez uniquement par le nombre avec une décimale.",
+        )
+        self.assertTrue(all(parse_answer_spec(question).kind == "generic_string"
+                            for question in questions))
 
     def test_inconsistent_specs_rejected(self):
         for spec in (self.spec("integer", decimals=2), self.spec("fixed_decimal"),

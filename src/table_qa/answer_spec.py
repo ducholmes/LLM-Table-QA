@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 import re
 from typing import Any
@@ -47,6 +48,61 @@ def _plain_label(value: Any, kind: str) -> str:
     return result
 
 
+def _final_scalar(value: Any, decimal_places: int | None) -> str:
+    if type(value) is bool:
+        return "Yes" if value else "No"
+    if type(value) is int or isinstance(value, Decimal):
+        if decimal_places is not None:
+            return _quantize(value, decimal_places, "ROUND_HALF_UP")
+        number = _number(value)
+        return str(value) if type(value) is int else format(number, "f")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, str):
+        return _plain_label(value, "final")
+    raise ValueError("Final answer must be a scalar or a flat list of scalars")
+
+
+def validate_final_answer(answer: str) -> bool:
+    """Check the technical submission boundary without guessing semantics."""
+    if not isinstance(answer, str) or not answer or answer != answer.strip():
+        return False
+    if any(char in answer for char in "\r\n\x00"):
+        return False
+    return answer.casefold() not in {
+        "nan", "+nan", "-nan", "infinity", "+infinity", "-infinity",
+    }
+
+
+def format_runtime_answer(value: RuntimeValue, format_spec: dict[str, Any] | None = None) -> str:
+    """Render a typed tool result using only explicit, small format metadata."""
+    spec = format_spec or {}
+    separator = spec.get("separator", ", ")
+    decimal_places = spec.get("decimal_places")
+    try:
+        if (not isinstance(separator, str) or not separator or len(separator) > 16
+                or any(char in separator for char in "\r\n\x00")):
+            raise ValueError("Answer separator must be 1-16 safe single-line characters")
+        if decimal_places is not None and (
+                type(decimal_places) is not int or not 0 <= decimal_places <= 10):
+            raise ValueError("decimal_places must be an integer between 0 and 10")
+        if isinstance(value, list):
+            if not value:
+                raise ValueError("Final answer list cannot be empty")
+            if any(isinstance(item, (dict, list)) or item is None for item in value):
+                raise ValueError("Final answer list must contain only non-null scalars")
+            answer = separator.join(_final_scalar(item, decimal_places) for item in value)
+        elif isinstance(value, dict) or value is None:
+            raise ValueError("Final answer must be a non-null scalar or a flat scalar list")
+        else:
+            answer = _final_scalar(value, decimal_places)
+    except (ArithmeticError, InvalidOperation, TypeError, ValueError) as exc:
+        _fail(str(exc))
+    if not validate_final_answer(answer):
+        _fail("Final answer is not a non-empty single-line string")
+    return answer
+
+
 def format_answer(value: RuntimeValue, spec: AnswerSpec | dict[str, Any]) -> str:
     """Render a tool result according to the validated answer format contract."""
     answer_spec = validate_answer_spec(spec)
@@ -66,6 +122,17 @@ def format_answer(value: RuntimeValue, spec: AnswerSpec | dict[str, Any]) -> str
                 answer = _plain_label(value, kind)
         elif kind in ("last_name", "category"):
             answer = _plain_label(value, kind)
+        elif kind == "generic_string":
+            if type(value) is bool:
+                answer = "Yes" if value else "No"
+            elif type(value) is int:
+                answer = str(value)
+            elif isinstance(value, Decimal) and value.is_finite():
+                answer = format(value, "f")
+            elif isinstance(value, str):
+                answer = _plain_label(value, kind)
+            else:
+                raise ValueError("generic_string requires a scalar string, number, or boolean")
         elif kind == "ordered_labels":
             if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
                 raise ValueError("ordered_labels requires a list of strings")
@@ -110,7 +177,7 @@ def validate_answer(answer: str, spec: AnswerSpec | dict[str, Any]) -> bool:
         return re.fullmatch(pattern, answer) is not None
     if kind == "yes_no":
         return answer in (answer_spec.allowed_values or ["Yes", "No"])
-    if kind in ("last_name", "category"):
+    if kind in ("last_name", "category", "generic_string"):
         if "\n" in answer or "\r" in answer:
             return False
         return answer in answer_spec.allowed_values if answer_spec.allowed_values else True

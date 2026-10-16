@@ -28,6 +28,9 @@
         "ref": {
           "type": "string",
           "pattern": "^\\$s[1-9][0-9]*$"
+        },
+        "format": {
+          "$ref": "#/$defs/return_format"
         }
       },
       "required": [
@@ -45,6 +48,23 @@
   ],
   "additionalProperties": false,
   "$defs": {
+    "return_format": {
+      "type": "object",
+      "properties": {
+        "separator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16,
+          "pattern": "^[^\\r\\n\\u0000]+$"
+        },
+        "decimal_places": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        }
+      },
+      "additionalProperties": false
+    },
     "operand": {
       "anyOf": [
         {

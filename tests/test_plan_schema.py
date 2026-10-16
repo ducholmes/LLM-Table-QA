@@ -36,6 +36,18 @@ class PlanSchemaTests(unittest.TestCase):
         checked["steps"][0]["args"]["cell"] = "E26"
         self.assertEqual(self.plan, original)
 
+    def test_return_format_is_small_closed_and_optional(self):
+        self.plan["return"]["format"] = {"separator": ", ", "decimal_places": 2}
+        validate_plan(self.plan, self.context)
+        for bad_format in (
+            {"unknown": True}, {"separator": ""}, {"separator": "\n"},
+            {"decimal_places": -1}, {"decimal_places": 11}, {"decimal_places": True},
+        ):
+            with self.subTest(format=bad_format):
+                plan = deepcopy(self.plan)
+                plan["return"]["format"] = bad_format
+                self.assert_bad(plan)
+
     def test_unknown_operator(self):
         self.plan["steps"][0]["op"] = "exec"
         self.assert_bad(self.plan, "UNKNOWN_OPERATOR")

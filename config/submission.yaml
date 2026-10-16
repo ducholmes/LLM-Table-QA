@@ -1,12 +1,10 @@
-run_profile: competition
+run_profile: submission
 input_mode: raw
 answer_mode: plan_tools
 prompt_version: planner_v1
 schema_version: plan_v1
 context_policy: full_table
 max_workers: 1
-queries: data/Public data 1/queries.json
-data_dir: data/Public data 1/xlsx_files
 run_root: runs
 llm:
   provider: openrouter
@@ -24,6 +22,4 @@ llm:
 query_timeout_seconds: 240
 run_timeout_seconds: 2400
 max_rss_mb: 1024
-expected_query_count: 20
-expected_workbook_count: 10
-submission_policy: fail_run
+submission_policy: emit_all_rows

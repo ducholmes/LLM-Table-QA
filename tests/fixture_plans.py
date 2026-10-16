@@ -23,8 +23,11 @@ def plan_for(query_id: str, table_id: str) -> dict[str, Any]:
         return add(op, {"left": left, "right": right})
 
     def finish(result: str) -> dict[str, Any]:
+        return_spec: dict[str, Any] = {"ref": result}
+        if query_id in {"p4_q007", "p4_q019"}:
+            return_spec["format"] = {"decimal_places": 2, "separator": ", "}
         return {"version": "plan_v1", "query_id": query_id, "table_id": table_id,
-                "steps": steps, "return": {"ref": result}}
+                "steps": steps, "return": return_spec}
 
     if query_id in ("p4_q001", "p4_q002"):
         source = add("select_records", {"sheet": "People", "row_range": "3:22", "fields": {

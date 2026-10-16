@@ -220,8 +220,9 @@ def validate_query_context(data: QueryContext | dict[str, Any]) -> QueryContext:
 def validate_query(data: Query | dict[str, Any]) -> Query:
     wire = _wire(data)
     validate_schema("query_v1", wire, code="INVALID_QUERY", stage="load")
-    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", wire["id"]):
-        _fail("INVALID_QUERY", "load", "id must contain only ASCII letters, digits, dot, underscore or hyphen")
+    if (not wire["id"].strip() or wire["id"] != wire["id"].strip()
+            or len(wire["id"]) > 256 or any(char in wire["id"] for char in "\r\n\x00")):
+        _fail("INVALID_QUERY", "load", "id must be a non-empty single-line string of at most 256 characters")
     if not re.fullmatch(r"[^/\\\x00]+\.xlsx", wire["file_name"]):
         _fail("INVALID_QUERY", "load", "file_name must be an XLSX basename")
     return Query.from_dict(wire)

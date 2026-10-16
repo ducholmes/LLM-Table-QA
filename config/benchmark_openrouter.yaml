@@ -12,7 +12,7 @@ llm:
   provider: openrouter
   model: google/gemma-4-26b-a4b-it:free
   json_mode: json_object
-  max_output_tokens: 2400
+  max_output_tokens: 4000
   request_timeout_seconds: 90
   max_api_attempts: 3
   max_planner_repair_calls: 1

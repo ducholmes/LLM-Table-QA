@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal
 from pathlib import Path
 import tempfile
 import unittest
@@ -114,6 +115,54 @@ class ExecutionEngineTests(unittest.TestCase):
         }
         self.assertEqual(self.execute(steps[:2], "$s2").value,
                          [{"label": None, "value": None}])
+
+    def test_explicit_numeric_cast_handles_display_formats_in_raw_and_parsed_modes(self):
+        for mode in ("raw", "parsed"):
+            with self.subTest(mode=mode):
+                wire = read_fixture(f"table_{mode}.json")
+                cells = ([cell for row in wire["sheets"][0]["raw_rows"] for cell in row["cells"]]
+                         if mode == "raw" else wire["sheets"][0]["parsed_cells"])
+                target = next(cell for cell in cells if cell["cell"] == "E25")
+                target.update(value_raw="$1,882", value_type="string", display_value="$1,882",
+                              number_format="General")
+                table = validate_table_context(wire)
+                context = validate_query_context(read_fixture(f"query_context_{mode}.json"))
+                selector = ({"sheet": "cpsaat07", "cell": "E25", "as_type": "number"}
+                            if mode == "raw" else {
+                                "sheet": "cpsaat07", "section_path": ["Women"],
+                                "row_header_path": ["Civilian noninstitutional population"],
+                                "column_header_path": ["Some college or associate degree",
+                                                       "Some college, no degree"],
+                                "as_type": "number",
+                            })
+                plan = {"version": "plan_v1", "query_id": context.query_id,
+                        "table_id": context.table_id,
+                        "steps": [{"id": "s1", "op": "lookup_cell", "args": selector}],
+                        "return": {"ref": "$s1"}}
+                self.assertEqual(execute_plan(validate_plan(plan, context), table).value,
+                                 Decimal("1882"))
+
+    def test_excel_percent_format_returns_percentage_points_and_missing_marker_is_distinct(self):
+        wire = read_fixture("table_raw.json")
+        cells = [cell for row in wire["sheets"][0]["raw_rows"] for cell in row["cells"]]
+        target = next(cell for cell in cells if cell["cell"] == "E25")
+        target.update(value_raw=0.185, value_type="number", display_value="18.5%",
+                      number_format="0.0%")
+        table = validate_table_context(wire)
+        steps = [{"id": "s1", "op": "lookup_cell", "args": {
+            "sheet": "cpsaat07", "cell": "E25", "as_type": "number",
+        }}]
+        plan = {"version": "plan_v1", "query_id": self.context.query_id,
+                "table_id": self.context.table_id, "steps": steps, "return": {"ref": "$s1"}}
+        self.assertEqual(execute_plan(validate_plan(plan, self.context), table).value,
+                         Decimal("18.500"))
+
+        target.update(value_raw="..", value_type="string", display_value="..",
+                      number_format="General")
+        table = validate_table_context(wire)
+        with self.assertRaises(PipelineError) as caught:
+            execute_plan(validate_plan(plan, self.context), table)
+        self.assertEqual(caught.exception.code, "MISSING_VALUE")
 
     def test_cli_exits_nonzero_after_recording_query_failures(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -36,8 +36,8 @@ class AppConfig:
     expected_query_count: int | None = None
     expected_workbook_count: int | None = None
     submission_policy: str = "fail_run"
-    queries: Path = Path("data/Public data 1/queries.json")
-    data_dir: Path = Path("data/Public data 1/xlsx_files")
+    queries: Path = Path("queries.json")
+    data_dir: Path = Path(".")
     parsed_dir: Path | None = None
     run_root: Path = Path("runs")
     llm: LLMConfig = field(default_factory=LLMConfig)
@@ -55,7 +55,7 @@ _LLM_KEYS = {
 }
 _PROVIDER_OPTION_KEYS = {
     "mock": set(),
-    "gemini": {"api_key_env", "api_surface", "thinking_level"},
+    "gemini": {"api_key_env", "api_surface", "thinking_level", "rate_limit"},
     "openrouter": {"api_key_env", "base_url", "temperature", "site_url", "app_name"},
 }
 
@@ -125,6 +125,29 @@ def validate_config(data: Any) -> AppConfig:
             thinking_level = provider_options.get("thinking_level", "low")
             if not isinstance(thinking_level, str) or thinking_level not in {"low", "medium", "high"}:
                 raise _invalid("gemini.thinking_level must be low, medium, or high")
+            rate_limit = provider_options.get("rate_limit", {})
+            if not isinstance(rate_limit, dict):
+                raise _invalid("gemini.rate_limit must be a mapping")
+            allowed_rate_keys = {
+                "enabled", "requests_per_minute", "input_tokens_per_minute",
+                "window_seconds", "token_estimate_safety_factor", "max_wait_seconds",
+            }
+            if extra_rate := set(rate_limit) - allowed_rate_keys:
+                raise _invalid(f"unknown gemini.rate_limit options: {', '.join(sorted(extra_rate))}")
+            enabled = rate_limit.get("enabled", False)
+            if type(enabled) is not bool:
+                raise _invalid("gemini.rate_limit.enabled must be boolean")
+            for key in ("requests_per_minute", "input_tokens_per_minute"):
+                value = rate_limit.get(key)
+                if value is not None and (type(value) is not int or value < 1):
+                    raise _invalid(f"gemini.rate_limit.{key} must be a positive integer or null")
+            for key in ("window_seconds", "token_estimate_safety_factor", "max_wait_seconds"):
+                value = rate_limit.get(key)
+                if value is not None and (type(value) not in (int, float) or value <= 0):
+                    raise _invalid(f"gemini.rate_limit.{key} must be a positive number")
+            if enabled and (rate_limit.get("requests_per_minute") is None
+                            and rate_limit.get("input_tokens_per_minute") is None):
+                raise _invalid("enabled gemini.rate_limit requires RPM or TPM")
     selected_options = options.get(llm.provider, {})
 
     for key in ("queries", "data_dir", "run_root"):
@@ -147,14 +170,14 @@ def validate_config(data: Any) -> AppConfig:
         expected_query_count=data.get("expected_query_count"),
         expected_workbook_count=data.get("expected_workbook_count"),
         submission_policy=data.get("submission_policy", "fail_run"),
-        queries=Path(data.get("queries", "data/Public data 1/queries.json")),
-        data_dir=Path(data.get("data_dir", "data/Public data 1/xlsx_files")),
+        queries=Path(data.get("queries", "queries.json")),
+        data_dir=Path(data.get("data_dir", ".")),
         parsed_dir=Path(data["parsed_dir"]) if data.get("parsed_dir") is not None else None,
         run_root=Path(data.get("run_root", "runs")),
         llm=llm,
     )
-    if not isinstance(config.run_profile, str) or config.run_profile not in {"development", "competition"}:
-        raise _invalid("run_profile must be development or competition")
+    if not isinstance(config.run_profile, str) or config.run_profile not in {"development", "competition", "submission"}:
+        raise _invalid("run_profile must be development, competition, or submission")
     if (not isinstance(config.input_mode, str) or config.input_mode not in {"raw", "parsed"}
             or not isinstance(config.answer_mode, str) or config.answer_mode not in {"plan_tools", "direct"}):
         raise _invalid("input_mode or answer_mode is unsupported")
@@ -177,37 +200,24 @@ def validate_config(data: Any) -> AppConfig:
     if (config.expected_workbook_count is not None
             and (type(config.expected_workbook_count) is not int or config.expected_workbook_count < 1)):
         raise _invalid("expected_workbook_count must be a positive integer when set")
-    if config.submission_policy != "fail_run":
-        raise _invalid("submission_policy must be fail_run in V1")
-    if config.run_profile == "competition" and (
+    if config.submission_policy not in {"fail_run", "emit_all_rows"}:
+        raise _invalid("submission_policy must be fail_run or emit_all_rows")
+    if config.run_profile in {"competition", "submission"} and (
         llm.provider != "openrouter" or llm.model != "qwen/qwen3.7-flash"
     ):
-        raise _invalid("competition profile requires openrouter/qwen/qwen3.7-flash")
-    if config.run_profile == "competition" and llm.max_planner_repair_calls != 1:
-        raise _invalid("competition profile requires max_planner_repair_calls=1")
-    if config.run_profile == "competition":
-        expected_paths = {
-            "queries": Path("data/Public data 1/queries.json"),
-            "data_dir": Path("data/Public data 1/xlsx_files"),
-            "run_root": Path("runs"),
-        }
-        mismatched = [name for name, expected in expected_paths.items()
-                      if getattr(config, name) != expected]
-        if mismatched:
-            raise _invalid(f"competition profile requires the fixed submission path(s): {', '.join(mismatched)}")
+        raise _invalid("submission profile requires openrouter/qwen/qwen3.7-flash")
+    if config.run_profile in {"competition", "submission"} and llm.max_planner_repair_calls != 1:
+        raise _invalid("submission profile requires max_planner_repair_calls=1")
+    if config.run_profile in {"competition", "submission"}:
         if (config.input_mode != "raw" or config.answer_mode != "plan_tools"
                 or config.prompt_version != "planner_v1" or config.parsed_dir is not None):
-            raise _invalid("competition profile requires raw/plan_tools/planner_v1 and no parsed_dir")
-        if config.expected_query_count != 20:
-            raise _invalid("competition profile requires expected_query_count=20")
-        if config.expected_workbook_count != 10:
-            raise _invalid("competition profile requires expected_workbook_count=10")
+            raise _invalid("submission profile requires raw/plan_tools/planner_v1 and no parsed_dir")
         if config.max_rss_mb > 1024:
-            raise _invalid("competition profile max_rss_mb cannot exceed 1024")
+            raise _invalid("submission profile max_rss_mb cannot exceed 1024")
         if llm.request_timeout_seconds > 90:
-            raise _invalid("competition profile request_timeout_seconds cannot exceed 90")
+            raise _invalid("submission profile request_timeout_seconds cannot exceed 90")
         if config.query_timeout_seconds > 240 or config.run_timeout_seconds > 2400:
-            raise _invalid("competition profile timeout exceeds the configured query/run budget")
+            raise _invalid("submission profile timeout exceeds the configured query/run budget")
     return config
 
 

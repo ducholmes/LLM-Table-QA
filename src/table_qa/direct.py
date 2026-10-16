@@ -17,8 +17,9 @@ def build_direct_request(context: QueryContext, *, model: str = "mock", json_mod
                          provider_options: dict | None = None) -> LLMRequest:
     user_prompt = "\n".join((
         f"QUERY_ID: {context.query_id}", f"TABLE_ID: {context.table_id}", "ANSWER_MODE=direct",
+        f"INPUT_MODE: {context.input_mode}",
         "QUESTION_JSON: " + json.dumps(context.query, ensure_ascii=False),
-        "ANSWER_SPEC: " + context.answer_spec.to_json(),
+        "OUTPUT_CONTRACT: Follow the explicit output instructions in QUESTION_JSON.",
         "TABLE_CONTEXT:", context.table_view,
         'Return only {"answer":"..."}.',
     ))

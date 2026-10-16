@@ -14,7 +14,6 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from table_qa.config import load_config  # noqa: E402
 from table_qa.contracts import PipelineError  # noqa: E402
-from table_qa.query_loader import load_queries  # noqa: E402
 
 
 MAX_ZIP_BYTES = 100_000_000
@@ -35,18 +34,18 @@ def _package_sources() -> list[Path]:
                   and "__pycache__" not in path.parts)
 
 
-def _validate_source_data() -> None:
+def _validate_submission_config() -> None:
     config = load_config(ROOT / "config" / "submission.yaml")
-    if config.run_profile != "competition":
-        raise ValueError("config/submission.yaml must use competition profile")
-    work = load_queries(ROOT / config.queries, ROOT / config.data_dir)
-    if (len(work) != config.expected_query_count
-            or len({path for _, path in work}) != config.expected_workbook_count):
-        raise ValueError("Submission input must resolve to 20 queries across 10 workbooks")
+    if config.run_profile not in {"submission", "competition"}:
+        raise ValueError("config/submission.yaml must use a submission profile")
+    if config.expected_query_count is not None or config.expected_workbook_count is not None:
+        raise ValueError("Submission config must not lock public query/workbook counts")
+    if config.submission_policy != "emit_all_rows":
+        raise ValueError("Submission config must emit one row for every input query")
 
 
 def build_submission_zip(output: Path, *, max_bytes: int = MAX_ZIP_BYTES) -> int:
-    _validate_source_data()
+    _validate_submission_config()
     files = [ROOT / relative for relative in FIXED_FILES]
     files.extend(_package_sources())
     missing = [path.relative_to(ROOT).as_posix() for path in files

@@ -5,6 +5,7 @@ from contextlib import redirect_stderr
 from dataclasses import asdict
 from io import StringIO
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -17,6 +18,7 @@ import zipfile
 from table_qa.config import load_config, validate_config
 from table_qa.contracts import PipelineError
 from table_qa.main import _apply_overrides, build_parser, main
+from table_qa.input_layout import resolve_input_layout
 from table_qa.runner import run_offline
 from tools.package_submission import build_submission_zip
 
@@ -27,13 +29,13 @@ DATA = ROOT / "data" / "Public data 1"
 
 
 class M6CompetitionConfigTests(unittest.TestCase):
-    def test_submission_profile_locks_paths_modes_and_expected_count(self):
+    def test_submission_profile_is_dataset_agnostic_and_locks_runtime(self):
         config = load_config(ROOT / "config" / "submission.yaml")
-        self.assertEqual(config.expected_query_count, 20)
-        self.assertEqual(config.expected_workbook_count, 10)
+        self.assertEqual(config.run_profile, "submission")
+        self.assertIsNone(config.expected_query_count)
+        self.assertIsNone(config.expected_workbook_count)
+        self.assertEqual(config.submission_policy, "emit_all_rows")
         self.assertEqual(config.max_rss_mb, 1024)
-        self.assertEqual(config.queries, Path("data/Public data 1/queries.json"))
-        self.assertEqual(config.data_dir, Path("data/Public data 1/xlsx_files"))
 
         over_budget = asdict(config)
         over_budget["run_timeout_seconds"] = 2401
@@ -41,18 +43,16 @@ class M6CompetitionConfigTests(unittest.TestCase):
             validate_config(over_budget)
 
         data = {
-            "run_profile": "competition",
+            "run_profile": "submission",
             "input_mode": "raw",
             "answer_mode": "plan_tools",
             "prompt_version": "planner_v1",
-            "queries": "elsewhere/queries.json",
-            "expected_query_count": 20,
-            "expected_workbook_count": 10,
             "llm": {"provider": "openrouter", "model": "qwen/qwen3.7-flash",
                     "max_planner_repair_calls": 1},
         }
-        with self.assertRaisesRegex(PipelineError, "fixed submission path"):
-            validate_config(data)
+        portable = validate_config(data)
+        self.assertEqual(portable.queries, Path("queries.json"))
+        self.assertEqual(portable.data_dir, Path("."))
 
     def test_competition_rejects_cli_overrides_before_backend_creation(self):
         args = build_parser().parse_args([
@@ -95,7 +95,103 @@ class M6CompetitionConfigTests(unittest.TestCase):
             finally:
                 os.chdir(original_cwd)
         self.assertEqual(code, 2)
-        self.assertIn("Input file not found", errors.getvalue())
+        self.assertIn("requires --input-dir and --output", errors.getvalue())
+
+    def test_input_layout_accepts_unicode_paths_and_rejects_unsafe_output(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "du lieu rieng"
+            root.mkdir()
+            (root / "queries.json").write_text("[]", encoding="utf-8")
+            output = Path(temp) / "ket qua" / "submission.csv"
+            layout = resolve_input_layout(input_dir=root, output_path=output)
+            self.assertEqual(layout.queries_path, root.resolve() / "queries.json")
+            self.assertEqual(layout.workbook_root, root.resolve())
+            self.assertEqual(layout.output_path, output.resolve())
+            with self.assertRaisesRegex(PipelineError, "overwrite an input"):
+                resolve_input_layout(input_dir=root, output_path=root / "queries.json")
+
+    def test_cli_parser_joins_unquoted_input_path_parts(self):
+        from table_qa.main import _joined_path
+
+        args = build_parser().parse_args([
+            "--input-dir", "data/Public", "data", "2",
+            "--workbook-dir", "xlsx_files",
+            "--output", "output/submission.csv",
+        ])
+        self.assertEqual(_joined_path(args.input_dir), Path("data/Public data 2"))
+        self.assertEqual(args.workbook_dir, Path("xlsx_files"))
+
+    def test_numeric_private_ids_are_normalized_for_csv_identity(self):
+        from table_qa.query_loader import load_queries
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            shutil.copy2(DATA / "xlsx_files" / "p4_t04.xlsx", root / "table.xlsx")
+            (root / "queries.json").write_text(json.dumps([{
+                "id": 1, "file_name": "table.xlsx", "query": "Return a value.",
+            }]), encoding="utf-8")
+            work = load_queries(root / "queries.json", root)
+            self.assertEqual(work[0][0].id, "1")
+
+    def test_emit_all_rows_writes_external_csv_for_failed_query(self):
+        query = json.loads((FIXTURE / "query.json").read_text(encoding="utf-8"))
+
+        class InvalidDirectClient:
+            def generate(self, _request):
+                from table_qa.contracts import LLMResponse, TokenUsage
+                return LLMResponse(text='{"answer":null}', provider="mock",
+                                   model_requested="mock", model_returned="mock",
+                                   usage=TokenUsage(), llm_elapsed_ms=0.0)
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            queries = root / "queries.json"
+            queries.write_text(json.dumps([query]), encoding="utf-8")
+            output = root / "nested" / "submission.csv"
+            run_dir = run_offline(
+                queries_path=queries, data_dir=DATA / "xlsx_files",
+                answer_mode="direct", run_root=root / "artifacts",
+                client=InvalidDirectClient(), output_path=output,
+                submission_policy="emit_all_rows",
+            )
+            self.assertTrue(output.is_file())
+            self.assertEqual(output.read_text(encoding="utf-8-sig").splitlines(),
+                             ["id,answer", "p4_q006,"])
+            summary = json.loads((run_dir / "summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(summary["submission_path"], str(output))
+
+    def test_cli_runs_portably_from_input_directory_to_exact_output(self):
+        query = json.loads((FIXTURE / "query.json").read_text(encoding="utf-8"))
+
+        class SuccessfulDirectClient:
+            def generate(self, _request):
+                from table_qa.contracts import LLMResponse, TokenUsage
+                return LLMResponse(text='{"answer":"7668"}', provider="mock",
+                                   model_requested="mock", model_returned="mock",
+                                   usage=TokenUsage(), llm_elapsed_ms=0.0)
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            input_dir = root / "private input"
+            input_dir.mkdir()
+            (input_dir / "queries.json").write_text(
+                json.dumps([{**query, "private_metadata": {"split": "hidden"}}]),
+                encoding="utf-8",
+            )
+            shutil.copy2(DATA / "xlsx_files" / query["file_name"],
+                         input_dir / query["file_name"])
+            output = root / "judge output" / "submission.csv"
+            with patch("table_qa.main.LLMBackendFactory.create",
+                       return_value=SuccessfulDirectClient()):
+                code = main([
+                    "--config", str(ROOT / "config" / "default.yaml"),
+                    "--input-dir", str(input_dir),
+                    "--output", str(output),
+                    "--answer-mode", "direct",
+                ])
+            self.assertEqual(code, 0)
+            self.assertEqual(output.read_text(encoding="utf-8-sig").splitlines(),
+                             ["id,answer", "p4_q006,7668"])
 
     def test_memory_limit_is_logged_and_prevents_submission(self):
         query = json.loads((FIXTURE / "query.json").read_text(encoding="utf-8"))
@@ -164,7 +260,7 @@ class M6PackagingTests(unittest.TestCase):
                     capture_output=True, text=True, check=False,
                 )
                 self.assertEqual(entrypoint.returncode, 2)
-                self.assertIn("AUTH_ERROR: Missing provider credential", entrypoint.stderr)
+                self.assertIn("Usage: sh run_submission.sh INPUT_DIR OUTPUT_CSV", entrypoint.stderr)
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from typing import Any
 
 from ..contracts import CellRef, PipelineError, RawCell, RuntimeLimits, TableContext, validate_runtime_value
 from ..contract_validation import cell_position
+from ..numeric import MissingNumericValue, excel_percent_count, numeric_unit, parse_numeric_text
 from .resolver import (
     TrackedValue, ValuePath, normalize_label, remap_sequence_paths, root_origins,
     unique_cell_refs, unit_values_at,
@@ -188,13 +189,16 @@ def _cell_value(cell: RawCell, as_type: str | None, table: TableContext, query_i
     if as_type == "number":
         if cell.value_type == "string" and isinstance(cell.value_raw, str):
             try:
-                number = Decimal(cell.value_raw.strip())
-            except InvalidOperation as exc:
-                raise _error("TYPE_ERROR", "String cell cannot be parsed as a number", query_id, step_id, cell=f"{ref.sheet}!{ref.cell}") from exc
-            if not number.is_finite():
-                raise _error("TYPE_ERROR", "String cell does not contain a finite number", query_id, step_id, cell=f"{ref.sheet}!{ref.cell}")
-            return number
-        return _number(typed, query_id, step_id)
+                return parse_numeric_text(cell.value_raw)
+            except MissingNumericValue as exc:
+                raise _error("MISSING_VALUE", str(exc), query_id, step_id,
+                             cell=f"{ref.sheet}!{ref.cell}", value=cell.value_raw) from exc
+            except ValueError as exc:
+                raise _error("TYPE_ERROR", "String cell cannot be parsed as a number", query_id, step_id,
+                             cell=f"{ref.sheet}!{ref.cell}", value=cell.value_raw) from exc
+        number = _number(typed, query_id, step_id)
+        percent_count = excel_percent_count(cell.number_format)
+        return _as_decimal(number) * (Decimal(100) ** percent_count) if percent_count else number
     if as_type == "date":
         if isinstance(typed, date):
             return typed
@@ -268,7 +272,11 @@ def _lookup_cell(args: dict[str, Any], table: TableContext, query_id: str, step_
     budget.reserve_cells(1, query_id=query_id, step_id=step_id)
     value = _cell_value(candidate, args.get("as_type"), table, query_id, step_id)
     reference = _ref(candidate)
-    units = {(): {candidate.unit}} if candidate.unit else {}
+    unit = candidate.unit
+    if unit is None and args.get("as_type") == "number":
+        unit = numeric_unit(candidate.value_raw if isinstance(candidate.value_raw, str) else None,
+                            candidate.number_format)
+    units = {(): {unit}} if unit else {}
     warnings = []
     if (args.get("as_type") == "date" or candidate.value_type == "date") and isinstance(candidate.value_raw, (int, float, Decimal)):
         if Decimal(str(candidate.value_raw)) % 1:
@@ -363,8 +371,12 @@ def _select_records(args: dict[str, Any], table: TableContext, query_id: str, st
             record[field_name] = value
             evidence.append(ref)
             origins[(index, field_name)] = [ref]
-            if cell.unit:
-                units[(index, field_name)] = {cell.unit}
+            unit = cell.unit
+            if unit is None and selector.get("as_type") == "number":
+                unit = numeric_unit(cell.value_raw if isinstance(cell.value_raw, str) else None,
+                                    cell.number_format)
+            if unit:
+                units[(index, field_name)] = {unit}
             if (selector.get("as_type") == "date" or cell.value_type == "date") and isinstance(cell.value_raw, (int, float, Decimal)):
                 if Decimal(str(cell.value_raw)) % 1:
                     warnings.append(f"time_component_discarded={ref.sheet}!{ref.cell}")

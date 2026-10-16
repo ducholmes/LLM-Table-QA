@@ -52,10 +52,14 @@ class DTOTests(unittest.TestCase):
                 StepResult(value=value, evidence=[]).to_json()
 
     def test_runtime_collections_and_reserved_tags(self):
-        for value in ([1, "2"], [True, 1], [[1]], [{"a": 1}, {"b": 2}],
+        for value in ([[1]], [{"a": 1}, {"b": 2}],
                       {"$type": "decimal", "value": "40.60"}, {"nested": [1]}):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 StepResult(value=value, evidence=[]).to_dict()
+        for value in ([1, "2"], [True, 1], ["label", Decimal("2.50")]):
+            with self.subTest(value=value):
+                result = StepResult(value=value, evidence=[])
+                self.assertEqual(StepResult.from_dict(json.loads(result.to_json())), result)
         for value in ({"$type": "unknown", "value": "x"},
                       {"$type": "decimal", "value": "invalid"},
                       {"$type": "decimal", "value": "3.14", "extra": True}):
